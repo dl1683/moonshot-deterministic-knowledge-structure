@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.npz
+*.npy
+.env
+.venv/
+env/
+venv/
+.continuum/
+
+# Claude Code memory/config (private)
+CLAUDE.md
+MEMORY.md
+.claude/
