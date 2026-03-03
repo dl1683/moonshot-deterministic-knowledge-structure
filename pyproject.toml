@@ -3,15 +3,19 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "deterministic-knowledge-structure"
-version = "0.1.0"
-description = "Deterministic knowledge structure V1"
+name = "dks"
+version = "0.2.0"
+description = "Deterministic Knowledge Structure — agentic AI memory with deterministic core"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "hypothesis>=6.0"]
+pipeline = ["numpy>=1.24"]
+llm = ["openai>=1.0"]
+mcp = ["mcp>=1.0"]
+all = ["dks[pipeline,llm,mcp]"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
