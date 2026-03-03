@@ -696,6 +696,20 @@ class TestContextExpansion:
         rev_ids = [r.revision_id for r in results]
         assert len(rev_ids) == len(set(rev_ids))
 
+    def test_context_expansion_preserves_order(self) -> None:
+        """Expanded chunks should be in document order."""
+        pipeline = self._make_pipeline_with_siblings()
+        results = pipeline.query("training backpropagation", k=1)
+        if results:
+            expanded = pipeline.expand_context(results[0], window=2)
+            # Check that chunk_idx values are in order
+            indices = []
+            for r in expanded:
+                core = pipeline.store.cores.get(r.core_id)
+                if core:
+                    indices.append(int(core.slots.get("chunk_idx", "0")))
+            assert indices == sorted(indices)
+
     def test_reconstruct_siblings_from_store(self) -> None:
         """Test that siblings can be reconstructed when not in memory."""
         from dks import ClaimCore, Provenance
@@ -722,3 +736,91 @@ class TestContextExpansion:
         # Don't set _chunk_siblings — force reconstruction
         siblings = pipeline._reconstruct_siblings(source)
         assert len(siblings) == 3
+
+
+# ---- Synthesis Tests ----
+
+
+class TestSynthesis:
+    """Tests for full-stack answer synthesis."""
+
+    def _make_pipeline(self) -> Pipeline:
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        docs = {
+            "intro.pdf": [
+                "Neural networks are the foundation of deep learning. They learn patterns through backpropagation.",
+                "Convolutional neural networks excel at image recognition tasks. They use local receptive fields.",
+            ],
+            "transformers.pdf": [
+                "Transformers use self-attention to process sequences in parallel. They replaced RNNs for NLP.",
+                "Multi-head attention allows transformers to attend to different representation subspaces.",
+            ],
+            "safety.pdf": [
+                "AI alignment ensures models behave according to human values and intentions.",
+                "Reinforcement learning from human feedback is a key technique for alignment.",
+            ],
+        }
+
+        for source, chunks in docs.items():
+            rev_ids = []
+            for i, text in enumerate(chunks):
+                core = ClaimCore(
+                    claim_type="document.chunk@v1",
+                    slots={"source": source, "chunk_idx": str(i), "text": text[:30]},
+                )
+                rev = store.assert_revision(
+                    core=core, assertion=text,
+                    valid_time=ValidTime(start=dt(2024), end=None),
+                    transaction_time=TransactionTime(tx_id=i+1, recorded_at=dt(2024)),
+                    provenance=Provenance(source=source),
+                    confidence_bp=5000,
+                )
+                search.add(rev.revision_id, text)
+                rev_ids.append(rev.revision_id)
+            pipeline._chunk_siblings[source] = rev_ids
+
+        search.rebuild()
+        return pipeline
+
+    def test_synthesize_returns_result(self) -> None:
+        from dks.pipeline import SynthesisResult
+        pipeline = self._make_pipeline()
+        result = pipeline.synthesize("neural networks", k=3, hops=1, context_window=0)
+        assert isinstance(result, SynthesisResult)
+        assert result.total_chunks > 0
+        assert result.question == "neural networks"
+
+    def test_synthesize_has_context(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.synthesize("transformers attention", k=3, hops=1, context_window=0)
+        assert result.context_length > 0
+        assert "Research Context" in result.context
+
+    def test_synthesize_has_themes(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.synthesize("deep learning", k=3, hops=1, context_window=0)
+        assert len(result.themes) >= 1
+
+    def test_synthesize_has_sources(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.synthesize("neural networks transformers", k=5, hops=1, context_window=0)
+        assert result.source_count >= 1
+        assert len(result.source_summaries) >= 1
+
+    def test_synthesize_summary(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.synthesize("AI alignment safety", k=3, hops=1, context_window=0)
+        summary = result.summary()
+        assert "Synthesis" in summary
+        assert "sources" in summary.lower()
+
+    def test_synthesize_with_context_window(self) -> None:
+        pipeline = self._make_pipeline()
+        without = pipeline.synthesize("transformers", k=2, hops=1, context_window=0)
+        with_ctx = pipeline.synthesize("transformers", k=2, hops=1, context_window=1)
+        # With context window should have more chunks
+        assert with_ctx.total_chunks >= without.total_chunks

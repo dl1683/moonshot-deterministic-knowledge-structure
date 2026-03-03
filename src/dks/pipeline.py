@@ -1259,6 +1259,124 @@ class Pipeline:
             relevant_topics=topic_info,
         )
 
+    # ---- Answer Synthesis ----
+
+    def synthesize(
+        self,
+        question: str,
+        *,
+        k: int = 10,
+        context_window: int = 1,
+        hops: int = 2,
+        max_context_chars: int = 30000,
+    ) -> "SynthesisResult":
+        """Full-stack retrieval and synthesis for answering complex questions.
+
+        This is the highest-level reasoning method. It combines:
+        1. Multi-hop retrieval (reason) for breadth
+        2. Context expansion for depth within documents
+        3. Source grouping for cross-document analysis
+        4. Evidence chain construction for traceability
+        5. Formatted output ready for LLM consumption
+
+        Args:
+            question: Complex natural language question.
+            k: Number of seed results per retrieval step.
+            context_window: Chunks before/after each seed to include.
+            hops: Number of multi-hop expansion rounds.
+            max_context_chars: Maximum characters in the output context.
+
+        Returns:
+            SynthesisResult with organized, source-attributed context.
+        """
+        if self._index is None:
+            raise ValueError("No search index configured.")
+
+        # Step 1: Multi-hop retrieval
+        reasoning = self.reason(question, k=k, hops=hops)
+
+        # Step 2: Expand context for top results
+        seen: set[str] = set()
+        expanded_results: list[SearchResult] = []
+
+        for r in reasoning.results:
+            if r.revision_id in seen:
+                continue
+
+            if context_window > 0:
+                context = self.expand_context(r, window=context_window)
+                for cr in context:
+                    if cr.revision_id not in seen:
+                        seen.add(cr.revision_id)
+                        expanded_results.append(cr)
+            else:
+                seen.add(r.revision_id)
+                expanded_results.append(r)
+
+        # Step 3: Group by source document
+        by_source: dict[str, list[SearchResult]] = {}
+        for r in expanded_results:
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            by_source.setdefault(source, []).append(r)
+
+        # Sort sources by relevance (sum of seed scores)
+        source_scores: dict[str, float] = {}
+        for source, chunks in by_source.items():
+            source_scores[source] = sum(r.score for r in chunks)
+        sorted_sources = sorted(by_source.keys(), key=lambda s: -source_scores[s])
+
+        # Step 4: Build structured context
+        context_parts: list[str] = []
+        context_parts.append(f"# Research Context: {question}\n")
+        context_parts.append(
+            f"Retrieved {len(expanded_results)} chunks from "
+            f"{len(by_source)} sources via {reasoning.total_hops}-hop retrieval.\n"
+        )
+
+        total_chars = 0
+        source_summaries: list[dict[str, Any]] = []
+
+        for source in sorted_sources:
+            chunks = by_source[source]
+            if total_chars >= max_context_chars:
+                break
+
+            context_parts.append(f"\n## Source: {source}")
+            context_parts.append(f"({len(chunks)} relevant chunks)\n")
+
+            for chunk in chunks:
+                remaining = max_context_chars - total_chars
+                if remaining <= 0:
+                    break
+                text = chunk.text[:remaining]
+                score_label = f" [relevance: {chunk.score:.3f}]" if chunk.score > 0 else ""
+                context_parts.append(f"### Chunk{score_label}")
+                context_parts.append(text)
+                context_parts.append("")
+                total_chars += len(text)
+
+            source_summaries.append({
+                "source": source,
+                "chunks": len(chunks),
+                "relevance": source_scores[source],
+            })
+
+        # Step 5: Extract key themes
+        all_text = " ".join(r.text[:200] for r in expanded_results[:20])
+        themes = self._extract_key_terms(all_text, max_terms=8)
+
+        return SynthesisResult(
+            question=question,
+            results=expanded_results,
+            sources=by_source,
+            source_summaries=source_summaries,
+            themes=themes,
+            context="\n".join(context_parts),
+            reasoning_trace=reasoning.trace,
+            total_chunks=len(expanded_results),
+        )
+
     def _decompose_question(
         self,
         question: str,
@@ -1592,6 +1710,66 @@ class EvidenceChain:
                 lines.append(f"### Related {i+1} (relevance: {r.score:.3f})")
                 lines.append(r.text[:500])
                 lines.append("")
+
+        return "\n".join(lines)
+
+
+@dataclass
+class SynthesisResult:
+    """Full-stack retrieval and synthesis result.
+
+    Contains organized, source-attributed context ready for LLM consumption
+    or human review.
+    """
+    question: str
+    results: list[SearchResult]
+    sources: dict[str, list[SearchResult]]
+    source_summaries: list[dict[str, Any]]
+    themes: list[str]
+    context: str
+    reasoning_trace: list[dict[str, Any]]
+    total_chunks: int
+
+    @property
+    def source_count(self) -> int:
+        return len(self.sources)
+
+    @property
+    def context_length(self) -> int:
+        return len(self.context)
+
+    def summary(self) -> str:
+        """Human-readable summary of the synthesis."""
+        lines = [f'Synthesis: "{self.question}"']
+        lines.append(
+            f"Retrieved {self.total_chunks} chunks from "
+            f"{self.source_count} sources"
+        )
+        lines.append(f"Context: {self.context_length:,} characters")
+        lines.append("")
+
+        if self.themes:
+            lines.append("Key themes: " + ", ".join(self.themes))
+            lines.append("")
+
+        lines.append("Sources (by relevance):")
+        for ss in self.source_summaries[:10]:
+            lines.append(
+                f"  [{ss['chunks']} chunks, rel={ss['relevance']:.3f}] "
+                f"{ss['source'][:55]}"
+            )
+
+        lines.append("")
+        lines.append("Reasoning trace:")
+        for t in self.reasoning_trace:
+            if t["hop"] == 0:
+                lines.append(f"  Hop 0: {t['results']} initial results")
+            else:
+                terms = t.get("expansion_terms", [])
+                lines.append(
+                    f"  Hop {t['hop']}: +{t['new']} new "
+                    f"(expanded: {', '.join(terms[:3])})"
+                )
 
         return "\n".join(lines)
 
