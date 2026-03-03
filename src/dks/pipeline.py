@@ -1666,6 +1666,231 @@ class Pipeline:
             total_chunks=len(expanded),
         )
 
+    # ---- Provenance & Citation ----
+
+    def provenance_of(self, result: SearchResult) -> dict[str, Any]:
+        """Get full provenance for a search result.
+
+        Returns structured provenance data including source document,
+        page number, chunk position, ingestion time, and confidence.
+
+        Args:
+            result: A SearchResult from any query method.
+
+        Returns:
+            Dict with source, page, chunk_idx, ingested_at, valid_time,
+            confidence_bp, and raw provenance.
+        """
+        rev = self.store.revisions.get(result.revision_id)
+        if rev is None:
+            return {"error": "revision not found", "revision_id": result.revision_id}
+
+        core = self.store.cores.get(result.core_id)
+
+        info: dict[str, Any] = {
+            "revision_id": result.revision_id,
+            "core_id": result.core_id,
+            "source": rev.provenance.source if rev.provenance else "unknown",
+            "evidence_ref_length": len(rev.provenance.evidence_ref) if rev.provenance and rev.provenance.evidence_ref else 0,
+            "confidence_bp": rev.confidence_bp,
+            "status": rev.status,
+            "valid_time": {
+                "start": rev.valid_time.start.isoformat(),
+                "end": rev.valid_time.end.isoformat() if rev.valid_time.end else None,
+            },
+            "transaction_time": {
+                "tx_id": rev.transaction_time.tx_id,
+                "recorded_at": rev.transaction_time.recorded_at.isoformat(),
+            },
+        }
+
+        # Extract structured fields from claim slots
+        if core:
+            info["claim_type"] = core.claim_type
+            if "source" in core.slots:
+                info["document"] = core.slots["source"]
+            if "page_start" in core.slots:
+                info["page"] = int(core.slots["page_start"])
+            if "chunk_idx" in core.slots:
+                info["chunk_index"] = int(core.slots["chunk_idx"])
+
+        return info
+
+    def cite(
+        self,
+        result: SearchResult,
+        *,
+        style: str = "inline",
+    ) -> str:
+        """Generate a formatted citation for a search result.
+
+        Args:
+            result: A SearchResult from any query method.
+            style: Citation style — "inline", "full", or "markdown".
+
+        Returns:
+            Formatted citation string.
+        """
+        prov = self.provenance_of(result)
+        if "error" in prov:
+            return f"[unknown source]"
+
+        source = prov.get("document", prov.get("source", "unknown"))
+        page = prov.get("page")
+        chunk_idx = prov.get("chunk_index")
+        tx_time = prov.get("transaction_time", {}).get("recorded_at", "")
+
+        if style == "inline":
+            parts = [source]
+            if page is not None:
+                parts.append(f"p.{page}")
+            return f"[{', '.join(parts)}]"
+
+        elif style == "markdown":
+            parts = [f"**{source}**"]
+            if page is not None:
+                parts.append(f"page {page}")
+            if chunk_idx is not None:
+                parts.append(f"chunk {chunk_idx}")
+            return " | ".join(parts)
+
+        else:  # full
+            parts = [f"Source: {source}"]
+            if page is not None:
+                parts.append(f"Page: {page}")
+            if chunk_idx is not None:
+                parts.append(f"Chunk: {chunk_idx}")
+            parts.append(f"Confidence: {prov.get('confidence_bp', 0)}/10000")
+            if tx_time:
+                parts.append(f"Ingested: {tx_time[:10]}")
+            return " | ".join(parts)
+
+    def cite_results(
+        self,
+        results: list[SearchResult],
+        *,
+        style: str = "inline",
+        deduplicate: bool = True,
+    ) -> list[str]:
+        """Generate citations for a list of search results.
+
+        Args:
+            results: List of SearchResult from any query method.
+            style: Citation style.
+            deduplicate: If True, skip duplicate sources.
+
+        Returns:
+            List of formatted citation strings.
+        """
+        citations: list[str] = []
+        seen_sources: set[str] = set()
+
+        for r in results:
+            citation = self.cite(r, style=style)
+            if deduplicate:
+                prov = self.provenance_of(r)
+                source_key = prov.get("document", prov.get("source", r.revision_id))
+                if source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
+            citations.append(citation)
+
+        return citations
+
+    def query_by_source(
+        self,
+        source: str,
+        *,
+        k: int = 50,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
+    ) -> list[SearchResult]:
+        """Retrieve all chunks from a specific source document.
+
+        Args:
+            source: Source document name (or partial match).
+            k: Maximum results.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
+
+        Returns:
+            List of SearchResult from the specified source.
+        """
+        results: list[SearchResult] = []
+        source_lower = source.lower()
+
+        for rid, rev in self.store.revisions.items():
+            if len(results) >= k:
+                break
+
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+
+            doc_source = core.slots.get("source", "")
+            if source_lower not in doc_source.lower():
+                continue
+
+            # Apply temporal filter
+            if valid_at is not None and tx_id is not None:
+                winner = self.store.query_as_of(
+                    rev.core_id, valid_at=valid_at, tx_id=tx_id,
+                )
+                if winner is None or winner.revision_id != rid:
+                    continue
+
+            results.append(SearchResult(
+                core_id=rev.core_id,
+                revision_id=rid,
+                score=1.0,
+                text=rev.assertion,
+            ))
+
+        return results
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        """List all unique source documents in the store.
+
+        Returns:
+            List of dicts with source name, chunk count, and page range.
+        """
+        sources: dict[str, dict[str, Any]] = {}
+
+        for rid, rev in self.store.revisions.items():
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+
+            source = core.slots.get("source", "unknown")
+            if source not in sources:
+                sources[source] = {
+                    "source": source,
+                    "chunks": 0,
+                    "pages": set(),
+                    "first_ingested": rev.transaction_time.recorded_at,
+                }
+
+            sources[source]["chunks"] += 1
+            page = core.slots.get("page_start")
+            if page is not None:
+                sources[source]["pages"].add(int(page))
+
+            if rev.transaction_time.recorded_at < sources[source]["first_ingested"]:
+                sources[source]["first_ingested"] = rev.transaction_time.recorded_at
+
+        result = []
+        for info in sorted(sources.values(), key=lambda x: -x["chunks"]):
+            pages = sorted(info["pages"])
+            result.append({
+                "source": info["source"],
+                "chunks": info["chunks"],
+                "page_range": f"{min(pages)}-{max(pages)}" if pages else "unknown",
+                "total_pages": len(pages),
+                "first_ingested": info["first_ingested"].isoformat(),
+            })
+
+        return result
+
     # ---- Contradiction Detection ----
 
     def contradictions(

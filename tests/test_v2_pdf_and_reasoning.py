@@ -1171,3 +1171,114 @@ class TestContradictionDetection:
         )
         # Should still work with temporal filtering
         assert isinstance(result, list)
+
+
+# ---- Provenance & Citation Tests ----
+
+
+class TestProvenanceCitation:
+    """Test provenance tracking and citation generation."""
+
+    def _make_pipeline(self) -> Pipeline:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        claims = [
+            ("attention mechanisms enable transformers to process sequences",
+             "attention_is_all_you_need.pdf", "0", "3"),
+            ("bert uses masked language modeling for pretraining",
+             "bert_paper.pdf", "0", "5"),
+            ("gpt models use autoregressive language modeling",
+             "gpt_paper.pdf", "1", "7"),
+        ]
+
+        for i, (text, source, chunk_idx, page) in enumerate(claims):
+            core = ClaimCore(
+                claim_type="document.chunk@v1",
+                slots={"source": source, "chunk_idx": chunk_idx, "page_start": page, "text": text[:50]},
+            )
+            rev = store.assert_revision(
+                core=core,
+                assertion=text,
+                valid_time=ValidTime(start=dt(2024)),
+                transaction_time=TransactionTime(tx_id=i + 1, recorded_at=dt(2024, i + 1, 1)),
+                provenance=Provenance(source=f"pdf:{source}", evidence_ref=text),
+                confidence_bp=5000,
+                status="asserted",
+            )
+            search.add(rev.revision_id, rev.assertion)
+
+        search.rebuild()
+        return pipeline
+
+    def test_provenance_of_result(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("attention transformers", k=1)
+        assert len(results) >= 1
+        prov = pipeline.provenance_of(results[0])
+        assert "source" in prov
+        assert "confidence_bp" in prov
+        assert prov["confidence_bp"] == 5000
+        assert "valid_time" in prov
+        assert "transaction_time" in prov
+
+    def test_provenance_has_page_and_chunk(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("attention transformers", k=1)
+        prov = pipeline.provenance_of(results[0])
+        assert "page" in prov
+        assert "chunk_index" in prov
+        assert isinstance(prov["page"], int)
+
+    def test_cite_inline(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("attention transformers", k=1)
+        citation = pipeline.cite(results[0], style="inline")
+        assert "[" in citation
+        assert "]" in citation
+
+    def test_cite_markdown(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("bert masked language", k=1)
+        citation = pipeline.cite(results[0], style="markdown")
+        assert "**" in citation  # bold source name
+
+    def test_cite_full(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("gpt autoregressive", k=1)
+        citation = pipeline.cite(results[0], style="full")
+        assert "Source:" in citation
+        assert "Confidence:" in citation
+
+    def test_cite_results_deduplicate(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("language modeling", k=5)
+        citations = pipeline.cite_results(results, style="inline", deduplicate=True)
+        # With deduplication, should have <= number of unique sources
+        assert len(citations) <= len(results)
+
+    def test_list_sources(self) -> None:
+        pipeline = self._make_pipeline()
+        sources = pipeline.list_sources()
+        assert len(sources) == 3
+        for s in sources:
+            assert "source" in s
+            assert "chunks" in s
+            assert s["chunks"] >= 1
+
+    def test_query_by_source(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query_by_source("bert")
+        assert len(results) >= 1
+        for r in results:
+            core = pipeline.store.cores.get(r.core_id)
+            assert "bert" in core.slots.get("source", "").lower()
+
+    def test_query_by_source_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        # Only tx_id=1 visible — should only see attention paper
+        results = pipeline.query_by_source("attention", valid_at=dt(2025), tx_id=1)
+        assert len(results) >= 1
