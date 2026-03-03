@@ -393,8 +393,8 @@ class Pipeline:
         """Merge another pipeline's store into this one.
 
         Note: Only the KnowledgeStore data is merged. The search index
-        is NOT automatically rebuilt — call rebuild_index() after merge
-        if search is needed.
+        and knowledge graph are NOT automatically rebuilt. Call
+        rebuild_index() and build_graph() after merge.
 
         Returns:
             MergeResult with merged store and any conflicts.
@@ -407,6 +407,9 @@ class Pipeline:
         self._ingester.store = self.store
         self._search.store = self.store
         self._explorer.store = self.store
+        # Invalidate stale graph — must rebuild after merge
+        # Explorer._graph is a property that reads pipeline._graph via _graph_fn
+        self._graph = None
         return result
 
     def rebuild_index(self) -> int:

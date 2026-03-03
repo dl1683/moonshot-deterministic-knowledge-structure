@@ -13,7 +13,6 @@ Includes:
 """
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -445,7 +444,7 @@ class PDFExtractor:
                         if md.get(key):
                             metadata[key] = md[key]
                 doc.close()
-            except Exception:
+            except (ImportError, ValueError, KeyError, RuntimeError, OSError):
                 pass
 
         return ExtractionResult(

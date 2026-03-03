@@ -2443,7 +2443,7 @@ class SearchEngine:
                             # Only consider cross-source pairs
                             if result_sources[results[i].revision_id] != result_sources[results[j].revision_id]:
                                 pairs_with_similarity.append((i, j, sim))
-            except Exception:
+            except (ValueError, ImportError, AttributeError):
                 pass
 
         if not pairs_with_similarity:
@@ -2921,5 +2921,5 @@ class SearchEngine:
                 ))
             rescored.sort(key=lambda r: -r.score)
             return rescored
-        except Exception:
+        except (ValueError, ImportError, AttributeError):
             return sorted(results, key=lambda r: -r.score)

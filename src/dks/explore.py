@@ -501,7 +501,7 @@ class Explorer:
         from .core import ValidTime as _VT
         from datetime import datetime as _dt
 
-        now = _dt.now()
+        now = _dt.now(timezone.utc)
         tx = self._tx_factory()
         count = 0
 
@@ -545,7 +545,7 @@ class Explorer:
         from .core import ValidTime as _VT
         from datetime import datetime as _dt
 
-        now = _dt.now()
+        now = _dt.now(timezone.utc)
         tx = self._tx_factory()
         count = 0
 
@@ -1800,7 +1800,7 @@ class Explorer:
                     "action": f"Review {len(review['flagged'])} flagged entities for quality",
                     "detail": "Use accept_entities/reject_entities to curate",
                 })
-        except Exception:
+        except (KeyError, ValueError, TypeError):
             pass
 
         # Sort by priority
@@ -1970,7 +1970,7 @@ class Explorer:
             slots=slots,
         )
 
-        now = _dt.now()
+        now = _dt.now(timezone.utc)
         tx = self._tx_factory()
 
         result = self.store.assert_revision(
@@ -2208,7 +2208,10 @@ class Explorer:
             sources[source]["chunks"] += 1
             page = core.slots.get("page_start")
             if page is not None:
-                sources[source]["pages"].add(int(page))
+                try:
+                    sources[source]["pages"].add(int(page))
+                except (ValueError, TypeError):
+                    pass
 
             if rev.transaction_time.recorded_at < sources[source]["first_ingested"]:
                 sources[source]["first_ingested"] = rev.transaction_time.recorded_at

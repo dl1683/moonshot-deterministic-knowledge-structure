@@ -501,14 +501,13 @@ class KnowledgeGraph:
                         ]
 
         # Step 2: Within-cluster pairwise similarity
+        rid_to_idx = {rid: i for i, rid in enumerate(revision_ids)}
         self._adjacency = {}
         for cluster_id, members in self._clusters.items():
             if len(members) <= 1:
                 continue
 
-            member_indices = [
-                revision_ids.index(rid) for rid in members
-            ]
+            member_indices = [rid_to_idx[rid] for rid in members]
             cluster_matrix = matrix[member_indices]
             sim_matrix = cosine_similarity(cluster_matrix)
 
