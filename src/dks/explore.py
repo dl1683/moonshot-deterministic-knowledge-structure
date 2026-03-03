@@ -569,9 +569,10 @@ class Explorer:
         Returns:
             Dict mapping entity -> "accepted" or "rejected".
         """
+        retracted = self.store.retracted_core_ids()
         decisions: dict[str, str] = {}
         for rid, rev in self.store.revisions.items():
-            if rev.status != "asserted":
+            if rev.status != "asserted" or rev.core_id in retracted:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core and core.claim_type == "dks.entity_review@v1":
@@ -1986,26 +1987,28 @@ class Explorer:
         Returns:
             List of annotation dicts with target, tags, note, and timestamp.
         """
-        # Find retracted core_ids (any core with a retracted revision)
-        retracted_cores: set[str] = set()
+        retracted = self.store.retracted_core_ids()
+
+        # Build set of active target revision_ids (to filter orphaned annotations)
+        active_targets: set[str] = set()
         for rid, rev in self.store.revisions.items():
-            if rev.status == "retracted":
-                core = self.store.cores.get(rev.core_id)
-                if core and core.claim_type == "dks.annotation@v1":
-                    retracted_cores.add(rev.core_id)
+            if rev.status == "asserted" and rev.core_id not in retracted:
+                active_targets.add(rid)
 
         annotations: list[dict[str, Any]] = []
 
         for rid, rev in self.store.revisions.items():
-            if rev.status != "asserted":
-                continue
-            if rev.core_id in retracted_cores:
+            if rev.status != "asserted" or rev.core_id in retracted:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None or core.claim_type != "dks.annotation@v1":
                 continue
 
             target = core.slots.get("target_revision", "")
+            # Skip orphaned annotations (target chunk was retracted)
+            if target and target not in active_targets:
+                continue
+
             tags_str = core.slots.get("tags", "")
             note = core.slots.get("note", "")
             tag_list = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []

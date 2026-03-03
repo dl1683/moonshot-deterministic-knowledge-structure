@@ -261,9 +261,12 @@ class SearchEngine:
 
     def _reconstruct_siblings(self, source: str) -> list[str]:
         """Reconstruct sibling chunk order from store data."""
-        # Find all chunks from this source
+        # Find all chunks from this source, excluding retracted
+        retracted = self.store.retracted_core_ids()
         chunks: list[tuple[int, str]] = []  # (chunk_idx, revision_id)
         for rev_id, rev in self.store.revisions.items():
+            if rev.status != "asserted" or rev.core_id in retracted:
+                continue
             core = self.store.cores.get(rev.core_id)
             if core and core.slots.get("source") == source:
                 try:
