@@ -118,7 +118,7 @@ class RegexExtractor:
                     claims.append(claim)
                     provenances.append(Provenance(
                         source=f"regex:{claim_type}",
-                        source_detail=match.group(0),
+                        evidence_ref=match.group(0),
                     ))
 
         return ExtractionResult(
@@ -213,7 +213,7 @@ class LLMExtractor:
             claims.append(claim)
             provenances.append(Provenance(
                 source=f"llm:{self._model_id}",
-                source_detail=text[:200],
+                evidence_ref=text[:200],
             ))
 
         return ExtractionResult(
