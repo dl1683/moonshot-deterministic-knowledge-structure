@@ -613,3 +613,112 @@ class TestEvidenceChain:
         context = chain.context_for_llm()
         assert "Evidence Analysis" in context
         assert "self-supervised learning" in context.lower()
+
+
+# ---- Context Expansion Tests ----
+
+
+class TestContextExpansion:
+    """Tests for context expansion and sibling chunk tracking."""
+
+    def _make_pipeline_with_siblings(self) -> Pipeline:
+        """Build a pipeline with tracked chunk siblings."""
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        # Simulate ingesting a 5-chunk document
+        source = "test_doc.pdf"
+        chunk_revisions = []
+        for i in range(5):
+            texts = [
+                "Introduction to machine learning and neural networks basics",
+                "Deep learning architectures including CNNs and transformers",
+                "Training techniques backpropagation gradient descent optimization",
+                "Evaluation metrics accuracy precision recall F1 score",
+                "Conclusion and future directions for AI research",
+            ]
+            core = ClaimCore(
+                claim_type="document.chunk@v1",
+                slots={"source": source, "chunk_idx": str(i), "text": texts[i][:30]},
+            )
+            rev = store.assert_revision(
+                core=core, assertion=texts[i],
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                provenance=Provenance(source=source),
+                confidence_bp=5000,
+            )
+            search.add(rev.revision_id, texts[i])
+            chunk_revisions.append(rev.revision_id)
+
+        search.rebuild()
+        pipeline._chunk_siblings[source] = chunk_revisions
+        return pipeline
+
+    def test_expand_context_returns_surrounding_chunks(self) -> None:
+        pipeline = self._make_pipeline_with_siblings()
+        results = pipeline.query("deep learning CNNs", k=1)
+        assert len(results) >= 1
+
+        expanded = pipeline.expand_context(results[0], window=1)
+        assert len(expanded) >= 2  # At least original + 1 neighbor
+
+    def test_expand_context_window_size(self) -> None:
+        pipeline = self._make_pipeline_with_siblings()
+        results = pipeline.query("training backpropagation", k=1)
+        assert len(results) >= 1
+
+        # Window of 2 around chunk 2 should give chunks 0-4
+        expanded = pipeline.expand_context(results[0], window=2)
+        assert len(expanded) >= 3  # At least 3 chunks
+
+    def test_expand_context_edge_chunk(self) -> None:
+        pipeline = self._make_pipeline_with_siblings()
+        results = pipeline.query("introduction machine learning basics", k=1)
+        assert len(results) >= 1
+
+        # Window around first chunk shouldn't go negative
+        expanded = pipeline.expand_context(results[0], window=2)
+        assert len(expanded) >= 1
+
+    def test_query_with_context(self) -> None:
+        pipeline = self._make_pipeline_with_siblings()
+        results = pipeline.query_with_context("deep learning", k=1, context_window=1)
+        # Should return more than just 1 result (expanded with context)
+        assert len(results) >= 2
+
+    def test_query_with_context_deduplicates(self) -> None:
+        pipeline = self._make_pipeline_with_siblings()
+        results = pipeline.query_with_context("neural networks", k=2, context_window=1)
+        # Should not have duplicate revision_ids
+        rev_ids = [r.revision_id for r in results]
+        assert len(rev_ids) == len(set(rev_ids))
+
+    def test_reconstruct_siblings_from_store(self) -> None:
+        """Test that siblings can be reconstructed when not in memory."""
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        source = "recon_doc.pdf"
+        for i in range(3):
+            core = ClaimCore(
+                claim_type="document.chunk@v1",
+                slots={"source": source, "chunk_idx": str(i), "text": f"chunk {i}"},
+            )
+            rev = store.assert_revision(
+                core=core, assertion=f"chunk {i} content about topic {i}",
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                provenance=Provenance(source=source),
+                confidence_bp=5000,
+            )
+            search.add(rev.revision_id, f"chunk {i} content about topic {i}")
+        search.rebuild()
+
+        # Don't set _chunk_siblings — force reconstruction
+        siblings = pipeline._reconstruct_siblings(source)
+        assert len(siblings) == 3

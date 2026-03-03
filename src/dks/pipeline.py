@@ -68,6 +68,8 @@ class Pipeline:
             self._index = SearchIndex(self.store, embedding_backend)
         self._reranker = reranker
         self._tx_counter = 0
+        # Track chunk siblings: source -> [revision_ids in order]
+        self._chunk_siblings: dict[str, list[str]] = {}
 
     def _next_tx(self) -> TransactionTime:
         """Auto-generate next transaction time."""
@@ -216,6 +218,10 @@ class Pipeline:
             # Index the chunk text for search
             if self._index is not None:
                 self._index.add(revision.revision_id, assertion)
+
+        # Track chunk siblings for context expansion
+        source_name = Path(path).name
+        self._chunk_siblings[source_name] = revision_ids
 
         return revision_ids
 
@@ -393,6 +399,130 @@ class Pipeline:
             tx_id=tx_id,
         )
 
+    # ---- Context Expansion ----
+
+    def expand_context(
+        self,
+        result: SearchResult,
+        *,
+        window: int = 2,
+    ) -> list[SearchResult]:
+        """Expand a search result to include surrounding chunks from the same document.
+
+        When a relevant chunk is found, this retrieves the N chunks before
+        and after it from the same source document, providing full context
+        for reasoning.
+
+        Args:
+            result: A SearchResult to expand context around.
+            window: Number of chunks before/after to include.
+
+        Returns:
+            Ordered list of SearchResults (including the original).
+        """
+        core = self.store.cores.get(result.core_id)
+        if core is None:
+            return [result]
+
+        source = core.slots.get("source", "")
+        if not source:
+            return [result]
+
+        # Find sibling chunks for this source
+        siblings = self._chunk_siblings.get(source)
+
+        # If siblings not tracked, try to reconstruct from store
+        if siblings is None:
+            siblings = self._reconstruct_siblings(source)
+
+        if not siblings:
+            return [result]
+
+        # Find position of this result in the sibling list
+        try:
+            pos = siblings.index(result.revision_id)
+        except ValueError:
+            return [result]
+
+        # Get window of surrounding chunks
+        start = max(0, pos - window)
+        end = min(len(siblings), pos + window + 1)
+
+        expanded = []
+        for rid in siblings[start:end]:
+            rev = self.store.revisions.get(rid)
+            if rev:
+                expanded.append(SearchResult(
+                    core_id=rev.core_id,
+                    revision_id=rid,
+                    score=result.score if rid == result.revision_id else 0.0,
+                    text=rev.assertion,
+                ))
+
+        return expanded
+
+    def _reconstruct_siblings(self, source: str) -> list[str]:
+        """Reconstruct sibling chunk order from store data."""
+        # Find all chunks from this source
+        chunks: list[tuple[int, str]] = []  # (chunk_idx, revision_id)
+        for rev_id, rev in self.store.revisions.items():
+            core = self.store.cores.get(rev.core_id)
+            if core and core.slots.get("source") == source:
+                try:
+                    idx = int(core.slots.get("chunk_idx", "0"))
+                except (ValueError, TypeError):
+                    idx = 0
+                chunks.append((idx, rev_id))
+
+        if not chunks:
+            return []
+
+        chunks.sort()
+        siblings = [rid for _, rid in chunks]
+        self._chunk_siblings[source] = siblings
+        return siblings
+
+    def query_with_context(
+        self,
+        question: str,
+        *,
+        k: int = 5,
+        context_window: int = 1,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
+    ) -> list[SearchResult]:
+        """Search with automatic context expansion.
+
+        Like query(), but each result includes surrounding chunks from
+        the same document for extended context.
+
+        Args:
+            question: Natural language query.
+            k: Number of seed results.
+            context_window: Chunks before/after each result to include.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
+
+        Returns:
+            List of SearchResults including expanded context, ordered
+            by seed result relevance with context chunks adjacent.
+        """
+        seeds = self.query(question, k=k, valid_at=valid_at, tx_id=tx_id)
+        if context_window <= 0:
+            return seeds
+
+        seen: set[str] = set()
+        expanded: list[SearchResult] = []
+
+        for seed in seeds:
+            context = self.expand_context(seed, window=context_window)
+            for r in context:
+                if r.revision_id not in seen:
+                    seen.add(r.revision_id)
+                    expanded.append(r)
+
+        return expanded
+
     # ---- Persistence ----
 
     def save(self, directory: str | Path) -> None:
@@ -445,9 +575,14 @@ class Pipeline:
             with open(directory / "graph.pkl", "wb") as f:
                 pickle.dump(graph_state, f)
 
-        # 4. Save metadata
+        # 4. Save chunk siblings map
+        if self._chunk_siblings:
+            with open(directory / "chunk_siblings.pkl", "wb") as f:
+                pickle.dump(self._chunk_siblings, f)
+
+        # 5. Save metadata
         meta = {
-            "version": "0.3.0",
+            "version": "0.4.0",
             "cores": len(self.store.cores),
             "revisions": len(self.store.revisions),
             "tx_counter": self._tx_counter,
@@ -531,6 +666,11 @@ class Pipeline:
             graph._revision_cluster = graph_state["revision_cluster"]
             graph._cluster_labels = graph_state["cluster_labels"]
             pipeline._graph = graph
+
+        # 6. Restore chunk siblings
+        if (directory / "chunk_siblings.pkl").exists():
+            with open(directory / "chunk_siblings.pkl", "rb") as f:
+                pipeline._chunk_siblings = pickle.load(f)
 
         return pipeline
 
