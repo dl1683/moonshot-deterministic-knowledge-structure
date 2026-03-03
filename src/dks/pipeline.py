@@ -258,6 +258,17 @@ class Pipeline:
             meta["graph_edges"] = self._graph.total_edges
             meta["graph_clusters"] = self._graph.total_clusters
 
+        # Save dense model name so we can restore the correct model
+        if dense_component is not None and hasattr(dense_component, '_model') and dense_component._model is not None:
+            model_name = getattr(dense_component._model, '_model_card_vars', {}).get('name', None)
+            if model_name is None:
+                # Fallback: try to get model name from model path
+                model_path = getattr(dense_component._model, 'model_card_data', None)
+                if model_path and hasattr(model_path, 'model_name'):
+                    model_name = model_path.model_name
+            if model_name:
+                meta["dense_model_name"] = model_name
+
         with open(directory / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
 
@@ -320,9 +331,11 @@ class Pipeline:
             # Set defaults before loading
             dense._batch_size = 64
             dense._dirty = True
+            # Restore the correct model (use saved name, fallback to default)
+            model_name = meta.get("dense_model_name", "all-MiniLM-L6-v2")
             try:
                 from sentence_transformers import SentenceTransformer
-                dense._model = SentenceTransformer("all-MiniLM-L6-v2")
+                dense._model = SentenceTransformer(model_name)
                 dense._dimension = dense._model.get_sentence_embedding_dimension()
             except ImportError:
                 dense._model = None
@@ -370,6 +383,9 @@ class Pipeline:
         if (directory / "chunk_siblings.pkl").exists():
             with open(directory / "chunk_siblings.pkl", "rb") as f:
                 pipeline._chunk_siblings = pickle.load(f)
+            # Update references in sub-modules (they hold refs to the old empty dict)
+            pipeline._ingester._chunk_siblings = pipeline._chunk_siblings
+            pipeline._search._chunk_siblings = pipeline._chunk_siblings
 
         return pipeline
 

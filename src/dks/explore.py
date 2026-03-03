@@ -800,8 +800,8 @@ class Explorer:
         # Neighbors from graph
         neighbor_previews: list[dict[str, Any]] = []
         if self._graph is not None:
-            adj = self._graph._adjacency.get(revision_id, {})
-            for nid, weight in sorted(adj.items(), key=lambda x: -x[1])[:5]:
+            adj = self._graph._adjacency.get(revision_id, [])
+            for nid, weight in sorted(adj, key=lambda x: -x[1])[:5]:
                 n_rev = self.store.revisions.get(nid)
                 if n_rev is None:
                     continue
@@ -2118,6 +2118,8 @@ class Explorer:
         sources: dict[str, dict[str, Any]] = {}
 
         for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
             core = self.store.cores.get(rev.core_id)
             if core is None:
                 continue

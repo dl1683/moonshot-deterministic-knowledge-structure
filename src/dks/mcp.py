@@ -29,14 +29,10 @@ class MCPToolHandler:
 
     def __init__(self, pipeline: Pipeline) -> None:
         self._pipeline = pipeline
-        self._tx_counter = 0
 
     def _next_tx(self) -> TransactionTime:
-        self._tx_counter += 1
-        return TransactionTime(
-            tx_id=self._tx_counter,
-            recorded_at=datetime.now(timezone.utc),
-        )
+        """Delegate to Pipeline's tx counter to avoid tx_id collisions."""
+        return self._pipeline._next_tx()
 
     def list_tools(self) -> list[dict[str, Any]]:
         """Return MCP tool definitions."""
