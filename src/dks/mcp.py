@@ -266,6 +266,49 @@ class MCPToolHandler:
                     },
                 },
             },
+            {
+                "name": "dks_annotate",
+                "description": "Add user-defined tags and notes to a chunk. Stored as deterministic claims.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "revision_id": {"type": "string", "description": "The chunk to annotate"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "List of tag strings"},
+                        "note": {"type": "string", "description": "Free-text note"},
+                    },
+                    "required": ["revision_id"],
+                },
+            },
+            {
+                "name": "dks_annotations",
+                "description": "List annotations, optionally filtered by target chunk or tag.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "revision_id": {"type": "string", "description": "Filter by target chunk"},
+                        "tag": {"type": "string", "description": "Filter by tag"},
+                    },
+                },
+            },
+            {
+                "name": "dks_search_by_tag",
+                "description": "Find all chunks annotated with a specific tag.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tag": {"type": "string", "description": "Tag to search for"},
+                    },
+                    "required": ["tag"],
+                },
+            },
+            {
+                "name": "dks_summarize",
+                "description": "Generate a text summary of what the corpus contains.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +343,10 @@ class MCPToolHandler:
             "dks_delete_cluster": self._handle_delete_cluster,
             "dks_insights": self._handle_insights,
             "dks_suggest_queries": self._handle_suggest_queries,
+            "dks_annotate": self._handle_annotate,
+            "dks_annotations": self._handle_annotations,
+            "dks_search_by_tag": self._handle_search_by_tag,
+            "dks_summarize": self._handle_summarize,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -514,6 +561,39 @@ class MCPToolHandler:
         n = args.get("n", 5)
         try:
             return {"suggestions": self._pipeline.suggest_queries(n=n)}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_annotate(self, args: dict[str, Any]) -> dict[str, Any]:
+        revision_id = args.get("revision_id", "")
+        if not revision_id:
+            return {"error": "revision_id is required"}
+        tags = args.get("tags", [])
+        note = args.get("note", "")
+        try:
+            ann_id = self._pipeline.annotate_chunk(
+                revision_id, tags=tags, note=note
+            )
+            return {"annotation_id": ann_id}
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_annotations(self, args: dict[str, Any]) -> dict[str, Any]:
+        revision_id = args.get("revision_id")
+        tag = args.get("tag")
+        return {"annotations": self._pipeline.list_annotations(
+            revision_id=revision_id, tag=tag
+        )}
+
+    def _handle_search_by_tag(self, args: dict[str, Any]) -> dict[str, Any]:
+        tag = args.get("tag", "")
+        if not tag:
+            return {"error": "tag is required"}
+        return {"results": self._pipeline.search_by_tag(tag)}
+
+    def _handle_summarize(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return {"summary": self._pipeline.summarize_corpus()}
         except ValueError as e:
             return {"error": str(e)}
 

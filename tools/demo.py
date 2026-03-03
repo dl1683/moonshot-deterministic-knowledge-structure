@@ -218,6 +218,9 @@ def interactive_repl(pipeline: Pipeline) -> None:
     entities              Review entity quality
     insights              Corpus health + recommendations
     suggest               Suggest interesting queries
+    annotate <id> <tags>  Tag a chunk (comma-separated tags)
+    annotations [tag]     List annotations, optionally filtered by tag
+    summary               Auto-generated corpus summary
     help                  Show this help
     quit                  Exit
 """)
@@ -375,6 +378,29 @@ def interactive_repl(pipeline: Pipeline) -> None:
                 for s in suggestions:
                     print(f"  [{s['type']:<12s}] {s['query']}")
                     print(f"    {s['rationale']}")
+
+            elif cmd == "annotate":
+                parts_ann = arg.split(maxsplit=1)
+                if len(parts_ann) < 2:
+                    print("  Usage: annotate <revision_id> <tag1,tag2,...>")
+                    continue
+                rid_ann, tags_str = parts_ann
+                tags_list = [t.strip() for t in tags_str.split(",")]
+                ann_id = pipeline.annotate_chunk(rid_ann, tags=tags_list)
+                print(f"  Annotated. ID: {ann_id[:30]}...")
+
+            elif cmd == "annotations":
+                tag_filter = arg.strip() if arg.strip() else None
+                anns = pipeline.list_annotations(tag=tag_filter)
+                if not anns:
+                    print("  No annotations found.")
+                for a in anns:
+                    print(f"  [{', '.join(a['tags'])}] -> {a['target_revision'][:30]}...")
+                    if a['note']:
+                        print(f"    Note: {a['note']}")
+
+            elif cmd == "summary":
+                print(pipeline.summarize_corpus())
 
             else:
                 print(f"  Unknown command: {cmd}. Type 'help' for options.")
