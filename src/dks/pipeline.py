@@ -1377,6 +1377,265 @@ class Pipeline:
             total_chunks=len(expanded_results),
         )
 
+    # ---- Adaptive Retrieval ----
+
+    def ask(
+        self,
+        question: str,
+        *,
+        k: int = 10,
+        strategy: str = "auto",
+    ) -> SynthesisResult:
+        """Intelligent adaptive retrieval — the single entry point for all queries.
+
+        Automatically classifies the query and selects the best retrieval
+        strategy:
+
+        - "factual": Direct search + re-rank for specific fact lookup
+        - "comparison": Search both terms, cross-document analysis
+        - "exploratory": Multi-hop + graph traversal for open-ended questions
+        - "multi-aspect": Decompose and search each aspect independently
+        - "auto": Classify automatically (default)
+
+        Args:
+            question: Any natural language question.
+            k: Maximum seed results.
+            strategy: Override the automatic strategy selection.
+
+        Returns:
+            SynthesisResult with organized, source-attributed context.
+        """
+        if strategy == "auto":
+            strategy = self._classify_query(question)
+
+        if strategy == "factual":
+            return self._retrieve_factual(question, k=k)
+        elif strategy == "comparison":
+            return self._retrieve_comparison(question, k=k)
+        elif strategy == "exploratory":
+            return self.synthesize(question, k=k, context_window=1, hops=3)
+        elif strategy == "multi-aspect":
+            return self._retrieve_multi_aspect(question, k=k)
+        else:
+            return self.synthesize(question, k=k, context_window=1, hops=2)
+
+    def _classify_query(self, question: str) -> str:
+        """Classify a query into a retrieval strategy type.
+
+        Uses heuristic patterns to determine query intent:
+        - Comparison: "vs", "compare", "difference between", "better than"
+        - Multi-aspect: conjunctions, multiple topics, "and", complex structure
+        - Factual: "what is", "define", "how does", short and specific
+        - Exploratory: "why", "explain", "how", open-ended
+        """
+        import re
+        q = question.lower().strip()
+
+        # Comparison patterns
+        comparison_patterns = [
+            r'\bvs\.?\b', r'\bversus\b', r'\bcompare\b', r'\bcompar',
+            r'\bdifference\s+between\b', r'\bbetter\s+than\b',
+            r'\badvantages?\s+(?:of|over)\b', r'\bpros?\s+and\s+cons?\b',
+        ]
+        for pat in comparison_patterns:
+            if re.search(pat, q):
+                return "comparison"
+
+        # Multi-aspect: multiple conjunctions, long queries
+        conjunctions = len(re.findall(r'\b(?:and|or|also|additionally)\b', q))
+        if conjunctions >= 2 or len(q) > 150:
+            return "multi-aspect"
+
+        # Factual: short, specific, "what is"
+        factual_patterns = [
+            r'^what\s+is\b', r'^define\b', r'^who\s+(?:is|was|are)\b',
+            r'^when\s+(?:did|was|is)\b', r'^where\s+(?:is|was|are)\b',
+        ]
+        for pat in factual_patterns:
+            if re.search(pat, q):
+                return "factual"
+
+        # Exploratory: open-ended questions (check before short-query fallback)
+        exploratory_patterns = [
+            r'^why\b', r'^how\s+(?:do|does|can|could|should)\b',
+            r'^explain\b', r'\bimpact\b', r'\bimplication',
+            r'\bfuture\b', r'\btrend',
+        ]
+        for pat in exploratory_patterns:
+            if re.search(pat, q):
+                return "exploratory"
+
+        # Short queries are usually factual
+        if len(q.split()) <= 4:
+            return "factual"
+
+        # Default to exploratory for longer questions
+        if len(q.split()) > 8:
+            return "exploratory"
+
+        return "factual"
+
+    def _retrieve_factual(
+        self,
+        question: str,
+        *,
+        k: int = 5,
+    ) -> SynthesisResult:
+        """Factual retrieval: direct search, high precision."""
+        results = self.query(question, k=k)
+
+        # Expand top result for context
+        expanded: list[SearchResult] = []
+        seen: set[str] = set()
+
+        if results:
+            context = self.expand_context(results[0], window=1)
+            for r in context:
+                if r.revision_id not in seen:
+                    seen.add(r.revision_id)
+                    expanded.append(r)
+
+        for r in results[1:]:
+            if r.revision_id not in seen:
+                seen.add(r.revision_id)
+                expanded.append(r)
+
+        # Build synthesis
+        by_source: dict[str, list[SearchResult]] = {}
+        for r in expanded:
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            by_source.setdefault(source, []).append(r)
+
+        context_parts = [f"# Answer Context: {question}\n"]
+        for r in expanded[:k]:
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "?") if core else "?"
+            context_parts.append(f"## From: {source}")
+            context_parts.append(r.text[:1000])
+            context_parts.append("")
+
+        return SynthesisResult(
+            question=question,
+            results=expanded,
+            sources=by_source,
+            source_summaries=[
+                {"source": s, "chunks": len(c), "relevance": sum(r.score for r in c)}
+                for s, c in by_source.items()
+            ],
+            themes=self._extract_key_terms(" ".join(r.text[:200] for r in expanded[:5]), max_terms=5),
+            context="\n".join(context_parts),
+            reasoning_trace=[{"hop": 0, "results": len(results), "new": len(results)}],
+            total_chunks=len(expanded),
+        )
+
+    def _retrieve_comparison(
+        self,
+        question: str,
+        *,
+        k: int = 10,
+    ) -> SynthesisResult:
+        """Comparison retrieval: search for both sides, cross-reference."""
+        import re
+
+        # Extract the two sides of the comparison
+        sides = re.split(r'\s+(?:vs\.?|versus|compared?\s+to|or)\s+', question, flags=re.IGNORECASE)
+
+        all_results: dict[str, SearchResult] = {}
+        side_results: dict[str, list[SearchResult]] = {}
+
+        for side in sides:
+            side = side.strip().rstrip("?.,!")
+            if len(side) < 3:
+                continue
+            results = self.query(side, k=k // 2)
+            side_results[side] = results
+            for r in results:
+                all_results[r.revision_id] = r
+
+        # Also search the full question
+        full_results = self.query(question, k=k)
+        for r in full_results:
+            all_results[r.revision_id] = r
+
+        final = sorted(all_results.values(), key=lambda r: -r.score)
+
+        # Build structured comparison context
+        by_source: dict[str, list[SearchResult]] = {}
+        for r in final:
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            by_source.setdefault(source, []).append(r)
+
+        context_parts = [f"# Comparison: {question}\n"]
+        for side, results in side_results.items():
+            context_parts.append(f"## Perspective: {side}")
+            for r in results[:k // 2]:
+                context_parts.append(r.text[:800])
+                context_parts.append("")
+
+        return SynthesisResult(
+            question=question,
+            results=final,
+            sources=by_source,
+            source_summaries=[
+                {"source": s, "chunks": len(c), "relevance": sum(r.score for r in c)}
+                for s, c in by_source.items()
+            ],
+            themes=list(side_results.keys()),
+            context="\n".join(context_parts),
+            reasoning_trace=[{"hop": 0, "results": len(full_results), "new": len(full_results)}],
+            total_chunks=len(final),
+        )
+
+    def _retrieve_multi_aspect(
+        self,
+        question: str,
+        *,
+        k: int = 10,
+    ) -> SynthesisResult:
+        """Multi-aspect retrieval: decompose and search each aspect."""
+        # Use query_deep for decomposition
+        deep = self.query_deep(question, k_per_subquery=k // 3, max_subqueries=4)
+
+        # Expand top results with context
+        expanded: list[SearchResult] = []
+        seen: set[str] = set()
+        for r in deep.results:
+            if r.revision_id not in seen:
+                context = self.expand_context(r, window=1)
+                for cr in context:
+                    if cr.revision_id not in seen:
+                        seen.add(cr.revision_id)
+                        expanded.append(cr)
+
+        by_source: dict[str, list[SearchResult]] = {}
+        for r in expanded:
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            by_source.setdefault(source, []).append(r)
+
+        context_parts = [f"# Multi-Aspect Analysis: {question}\n"]
+        for facet in deep.facets:
+            context_parts.append(f"## Aspect: {facet.subquery}")
+            for r in facet.results[:3]:
+                context_parts.append(r.text[:600])
+                context_parts.append("")
+
+        return SynthesisResult(
+            question=question,
+            results=expanded,
+            sources=by_source,
+            source_summaries=[
+                {"source": s, "chunks": len(c), "relevance": sum(r.score for r in c)}
+                for s, c in by_source.items()
+            ],
+            themes=deep.subqueries,
+            context="\n".join(context_parts),
+            reasoning_trace=[{"hop": 0, "results": len(deep.results), "new": len(deep.results)}],
+            total_chunks=len(expanded),
+        )
+
     def _decompose_question(
         self,
         question: str,

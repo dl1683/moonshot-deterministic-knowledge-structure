@@ -738,6 +738,88 @@ class TestContextExpansion:
         assert len(siblings) == 3
 
 
+# ---- Adaptive Retrieval Tests ----
+
+
+class TestAdaptiveRetrieval:
+    """Tests for query classification and adaptive retrieval."""
+
+    def test_classify_factual(self) -> None:
+        store = KnowledgeStore()
+        idx = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=idx)
+        assert pipeline._classify_query("what is backpropagation") == "factual"
+        assert pipeline._classify_query("graph neural networks") == "factual"
+        assert pipeline._classify_query("define entropy") == "factual"
+
+    def test_classify_comparison(self) -> None:
+        store = KnowledgeStore()
+        idx = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=idx)
+        assert pipeline._classify_query("transformers vs RNNs") == "comparison"
+        assert pipeline._classify_query("compare CNNs and transformers") == "comparison"
+
+    def test_classify_exploratory(self) -> None:
+        store = KnowledgeStore()
+        idx = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=idx)
+        assert pipeline._classify_query("why do models hallucinate") == "exploratory"
+        assert pipeline._classify_query("explain the impact of AI on society") == "exploratory"
+
+    def test_ask_returns_synthesis(self) -> None:
+        from dks import ClaimCore, Provenance
+        from dks.pipeline import SynthesisResult
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        for i, text in enumerate([
+            "Neural networks learn patterns through backpropagation",
+            "Transformers use attention for sequence processing",
+            "RNNs process sequences sequentially with hidden state",
+        ]):
+            core = ClaimCore(claim_type="test", slots={"source": f"doc{i}.pdf", "text": text[:20]})
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=i+1, recorded_at=dt(2024)),
+                provenance=Provenance(source=f"doc{i}.pdf"),
+                confidence_bp=5000,
+            )
+            search.add(rev.revision_id, text)
+        search.rebuild()
+
+        result = pipeline.ask("what is backpropagation")
+        assert isinstance(result, SynthesisResult)
+        assert result.total_chunks > 0
+
+    def test_ask_comparison_strategy(self) -> None:
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        for i, text in enumerate([
+            "Transformers use self-attention mechanism for parallel processing",
+            "RNNs process data sequentially with recurrent connections",
+            "CNNs use convolutional filters for spatial features",
+        ]):
+            core = ClaimCore(claim_type="test", slots={"source": f"doc{i}.pdf", "text": text[:20]})
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=i+1, recorded_at=dt(2024)),
+                provenance=Provenance(source=f"doc{i}.pdf"),
+                confidence_bp=5000,
+            )
+            search.add(rev.revision_id, text)
+        search.rebuild()
+
+        result = pipeline.ask("transformers vs RNNs")
+        assert result.total_chunks > 0
+        assert "Comparison" in result.context
+
+
 # ---- Synthesis Tests ----
 
 
