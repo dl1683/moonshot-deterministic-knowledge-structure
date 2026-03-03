@@ -1762,3 +1762,126 @@ class TestAuditTrail:
         pipeline.ask("transformers")
         # last_audit should still be the previous one (not overwritten)
         assert pipeline.last_audit().question == "neural networks"
+
+
+# ---- Answer Extraction Tests ----
+
+
+class TestAnswerExtraction:
+
+    def _make_pipeline(self) -> Pipeline:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        docs = {
+            "paper_a.pdf": [
+                "Neural networks use backpropagation to learn. Backpropagation computes gradients layer by layer. This is the core training algorithm for deep learning.",
+                "Convolutional neural networks excel at image recognition. They use local receptive fields and weight sharing to reduce parameters.",
+            ],
+            "paper_b.pdf": [
+                "Transformers replaced RNNs for natural language processing. Self-attention enables parallel computation across the sequence.",
+                "Large language models can hallucinate incorrect facts. They lack grounded understanding and generate plausible but wrong text.",
+            ],
+            "paper_c.pdf": [
+                "Reinforcement learning trains agents through reward signals. The agent learns a policy that maximizes cumulative reward.",
+                "Deep reinforcement learning combines neural networks with RL. This enables learning from high-dimensional state spaces.",
+            ],
+        }
+
+        for source, chunks in docs.items():
+            rev_ids = []
+            for i, text in enumerate(chunks):
+                core = ClaimCore(
+                    claim_type="document.chunk@v1",
+                    slots={"source": source, "chunk_idx": str(i), "text": text[:30]},
+                )
+                rev = store.assert_revision(
+                    core=core, assertion=text,
+                    valid_time=ValidTime(start=dt(2024), end=None),
+                    transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                    provenance=Provenance(source=source),
+                    confidence_bp=5000,
+                )
+                search.add(rev.revision_id, text)
+                rev_ids.append(rev.revision_id)
+            pipeline._chunk_siblings[source] = rev_ids
+
+        search.rebuild()
+        return pipeline
+
+    def test_extract_answer_returns_structure(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("How do neural networks learn?")
+        assert "question" in result
+        assert "answer_sentences" in result
+        assert "supporting_chunks" in result
+        assert "confidence" in result
+        assert "source_count" in result
+
+    def test_extract_answer_finds_relevant_sentences(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("How do neural networks learn?")
+        assert len(result["answer_sentences"]) > 0
+        # Should find backpropagation-related sentence
+        all_text = " ".join(s["text"] for s in result["answer_sentences"])
+        assert "backpropagation" in all_text.lower() or "neural" in all_text.lower()
+
+    def test_extract_answer_has_overlap_terms(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("neural networks backpropagation")
+        for sent in result["answer_sentences"]:
+            assert "overlap_terms" in sent
+            assert isinstance(sent["overlap_terms"], list)
+
+    def test_extract_answer_confidence(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("How do neural networks learn?")
+        assert 0.0 <= result["confidence"] <= 1.0
+        # Should have decent confidence for a matching query
+        assert result["confidence"] > 0.0
+
+    def test_extract_answer_no_results(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("quantum gravity string theory")
+        # May still find some results but with low relevance
+        assert result["confidence"] >= 0.0
+
+    def test_answer_full_pipeline(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.answer("How do neural networks learn?", k=5, hops=1)
+        assert "strategy" in result
+        assert result["source_count"] > 0
+        assert len(result["answer_sentences"]) > 0
+
+    def test_answer_with_audit(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        result = pipeline.answer("Why do transformers use attention?", k=5, hops=1)
+        audit = pipeline.last_audit()
+        assert audit is not None
+        assert audit.operation == "answer"
+        stages = [e.stage for e in audit.events]
+        assert "classify" in stages
+        assert "retrieve" in stages
+        assert "extract" in stages
+
+    def test_extract_answer_deduplication(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("neural networks deep learning")
+        # Verify no near-duplicate sentences
+        texts = [s["text"] for s in result["answer_sentences"]]
+        for i in range(len(texts)):
+            for j in range(i + 1, len(texts)):
+                words_i = set(texts[i].lower().split())
+                words_j = set(texts[j].lower().split())
+                jaccard = len(words_i & words_j) / max(len(words_i | words_j), 1)
+                assert jaccard <= 0.6, f"Near-duplicate sentences found: {texts[i][:50]}... vs {texts[j][:50]}..."
+
+    def test_answer_sentences_sorted_by_score(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.extract_answer("How do neural networks learn backpropagation?")
+        scores = [s["score"] for s in result["answer_sentences"]]
+        assert scores == sorted(scores, reverse=True)

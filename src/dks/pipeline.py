@@ -2595,6 +2595,222 @@ class Pipeline:
             "graph_distance": graph_distance,
         }
 
+    # ---- Answer Extraction ----
+
+    def extract_answer(
+        self,
+        question: str,
+        results: list[SearchResult] | None = None,
+        *,
+        k: int = 10,
+        max_sentences: int = 5,
+        min_relevance: float = 0.1,
+    ) -> dict[str, Any]:
+        """Extract the most relevant answer sentences from retrieved chunks.
+
+        Performs sentence-level re-ranking against the question to find
+        the specific passages that best answer it, without requiring an LLM.
+
+        Args:
+            question: The question to answer.
+            results: Pre-retrieved results (auto-retrieves if None).
+            k: Number of chunks to consider (if auto-retrieving).
+            max_sentences: Maximum answer sentences to return.
+            min_relevance: Minimum sentence relevance score (0-1).
+
+        Returns:
+            Dict with:
+              - question: str
+              - answer_sentences: list of {text, score, source, chunk_rank}
+              - supporting_chunks: list of {text_preview, score, source}
+              - confidence: float (0-1, based on answer quality)
+              - source_count: int
+        """
+        import re
+
+        if results is None:
+            results = self.query(question, k=k)
+
+        if not results:
+            return {
+                "question": question,
+                "answer_sentences": [],
+                "supporting_chunks": [],
+                "confidence": 0.0,
+                "source_count": 0,
+            }
+
+        # Extract question terms for scoring
+        stop_words = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "can", "may", "might", "to", "of", "in",
+            "for", "on", "with", "at", "by", "from", "as", "and", "or",
+            "but", "not", "this", "that", "it", "its", "what", "which",
+            "who", "how", "why", "when", "where", "if", "so", "than",
+            "about", "between", "into", "through", "during", "each",
+        }
+        q_terms = set(re.findall(r'\b\w{3,}\b', question.lower())) - stop_words
+
+        # Score each sentence across all chunks
+        scored_sentences: list[dict[str, Any]] = []
+
+        for chunk_rank, result in enumerate(results[:k]):
+            core = self.store.cores.get(result.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+
+            # Split into sentences
+            sentences = re.split(r'(?<=[.!?])\s+', result.text)
+
+            for sent in sentences:
+                sent = sent.strip()
+                if len(sent) < 20:  # Skip very short fragments
+                    continue
+
+                # Score: term overlap with question
+                s_terms = set(re.findall(r'\b\w{3,}\b', sent.lower())) - stop_words
+                if not s_terms:
+                    continue
+
+                overlap = len(q_terms & s_terms)
+                overlap_ratio = overlap / max(len(q_terms), 1)
+
+                # Bonus for informativeness (sentences that add information)
+                info_ratio = len(s_terms - q_terms) / max(len(s_terms), 1)
+
+                # Combined score: high overlap + some new info
+                # Penalize pure question echoes (info_ratio too low)
+                # Penalize no overlap (overlap_ratio = 0)
+                score = overlap_ratio * 0.7 + min(info_ratio, 0.8) * 0.3
+
+                # Chunk rank penalty (earlier chunks are more relevant)
+                rank_discount = 1.0 / (1.0 + chunk_rank * 0.1)
+                score *= rank_discount
+
+                scored_sentences.append({
+                    "text": sent,
+                    "score": round(score, 4),
+                    "source": source,
+                    "chunk_rank": chunk_rank,
+                    "overlap_terms": sorted(q_terms & s_terms),
+                })
+
+        # Sort by score and deduplicate near-identical sentences
+        scored_sentences.sort(key=lambda x: -x["score"])
+
+        answer_sentences = []
+        seen_text: set[str] = set()
+
+        for s in scored_sentences:
+            if s["score"] < min_relevance:
+                break
+            # Dedup: skip if >60% word overlap with already selected sentence
+            s_words = set(s["text"].lower().split())
+            is_dup = False
+            for existing in answer_sentences:
+                e_words = set(existing["text"].lower().split())
+                jaccard = len(s_words & e_words) / max(len(s_words | e_words), 1)
+                if jaccard > 0.6:
+                    is_dup = True
+                    break
+            if not is_dup:
+                answer_sentences.append(s)
+            if len(answer_sentences) >= max_sentences:
+                break
+
+        # Supporting chunks summary
+        supporting = []
+        sources = set()
+        for result in results[:k]:
+            core = self.store.cores.get(result.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            sources.add(source)
+            supporting.append({
+                "text_preview": result.text[:150],
+                "score": round(result.score, 4),
+                "source": source,
+            })
+
+        # Confidence based on answer quality
+        if answer_sentences:
+            avg_score = sum(s["score"] for s in answer_sentences) / len(answer_sentences)
+            coverage = min(len(answer_sentences) / max_sentences, 1.0)
+            source_diversity = min(len(sources) / 3, 1.0)
+            confidence = avg_score * 0.5 + coverage * 0.3 + source_diversity * 0.2
+        else:
+            confidence = 0.0
+
+        return {
+            "question": question,
+            "answer_sentences": answer_sentences,
+            "supporting_chunks": supporting[:5],
+            "confidence": round(confidence, 3),
+            "source_count": len(sources),
+        }
+
+    def answer(
+        self,
+        question: str,
+        *,
+        k: int = 10,
+        hops: int = 2,
+        max_sentences: int = 5,
+    ) -> dict[str, Any]:
+        """Full pipeline: retrieve + reason + extract answer.
+
+        This is the highest-level answering method. It combines multi-hop
+        retrieval with sentence-level answer extraction.
+
+        Args:
+            question: Any natural language question.
+            k: Number of seed results.
+            hops: Multi-hop reasoning depth.
+            max_sentences: Maximum answer sentences.
+
+        Returns:
+            Dict with question, answer_sentences, supporting_chunks,
+            confidence, source_count, strategy, and audit trace (if enabled).
+        """
+        t0 = _time.time()
+        audit = self._begin_audit("answer", question)
+
+        # Step 1: Classify and retrieve
+        strategy = self._classify_query(question)
+        if audit:
+            audit.strategy = strategy
+            audit.add("classify", f"Query classified as '{strategy}'",
+                      {"question": question}, {"strategy": strategy},
+                      (_time.time() - t0) * 1000)
+
+        # Step 2: Retrieve using best strategy
+        t_retrieve = _time.time()
+        if strategy == "factual":
+            results = self.query(question, k=k)
+        else:
+            reasoning = self.reason(question, k=k, hops=hops)
+            results = reasoning.results
+
+        if audit:
+            audit.add("retrieve", f"Retrieved {len(results)} chunks",
+                      {"strategy": strategy, "k": k},
+                      {"chunk_count": len(results)},
+                      (_time.time() - t_retrieve) * 1000)
+
+        # Step 3: Extract answer
+        t_extract = _time.time()
+        answer = self.extract_answer(question, results,
+                                     max_sentences=max_sentences)
+        if audit:
+            audit.add("extract", f"Extracted {len(answer['answer_sentences'])} answer sentences",
+                      {"max_sentences": max_sentences},
+                      {"sentence_count": len(answer["answer_sentences"]),
+                       "confidence": answer["confidence"]},
+                      (_time.time() - t_extract) * 1000)
+            self._finish_audit(audit, t0)
+
+        answer["strategy"] = strategy
+        return answer
+
     # ---- Contradiction Detection ----
 
     def contradictions(
