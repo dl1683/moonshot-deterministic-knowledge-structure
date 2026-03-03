@@ -2641,6 +2641,7 @@ class Pipeline:
             }
 
         # Extract question terms for scoring
+        import math
         stop_words = {
             "the", "a", "an", "is", "are", "was", "were", "be", "been",
             "have", "has", "had", "do", "does", "did", "will", "would",
@@ -2650,50 +2651,88 @@ class Pipeline:
             "who", "how", "why", "when", "where", "if", "so", "than",
             "about", "between", "into", "through", "during", "each",
         }
-        q_terms = set(re.findall(r'\b\w{3,}\b', question.lower())) - stop_words
+        q_terms = [w for w in re.findall(r'\b\w{3,}\b', question.lower())
+                    if w not in stop_words]
+        q_term_set = set(q_terms)
 
-        # Score each sentence across all chunks
-        scored_sentences: list[dict[str, Any]] = []
-
+        # Collect all sentences for IDF computation
+        all_sentences: list[tuple[str, str, int]] = []  # (text, source, chunk_rank)
         for chunk_rank, result in enumerate(results[:k]):
             core = self.store.cores.get(result.core_id)
             source = core.slots.get("source", "unknown") if core else "unknown"
-
-            # Split into sentences
             sentences = re.split(r'(?<=[.!?])\s+', result.text)
-
             for sent in sentences:
                 sent = sent.strip()
-                if len(sent) < 20:  # Skip very short fragments
+                if len(sent) >= 20:
+                    all_sentences.append((sent, source, chunk_rank))
+
+        if not all_sentences:
+            return {
+                "question": question,
+                "answer_sentences": [],
+                "supporting_chunks": [],
+                "confidence": 0.0,
+                "source_count": 0,
+            }
+
+        # Compute IDF for query terms across all sentences
+        n_docs = len(all_sentences)
+        doc_freq: dict[str, int] = {}
+        for sent, _, _ in all_sentences:
+            s_terms = set(re.findall(r'\b\w{3,}\b', sent.lower())) - stop_words
+            for term in q_term_set & s_terms:
+                doc_freq[term] = doc_freq.get(term, 0) + 1
+
+        # BM25 parameters
+        bm25_k1 = 1.2
+        bm25_b = 0.75
+        avg_len = sum(len(s[0].split()) for s in all_sentences) / max(n_docs, 1)
+
+        # Score each sentence with BM25
+        scored_sentences: list[dict[str, Any]] = []
+
+        for sent, source, chunk_rank in all_sentences:
+            s_words = re.findall(r'\b\w{3,}\b', sent.lower())
+            s_terms = set(s_words) - stop_words
+            if not s_terms:
+                continue
+
+            # BM25 score
+            doc_len = len(s_words)
+            bm25_score = 0.0
+            for term in q_term_set:
+                if term not in s_terms:
                     continue
+                tf = s_words.count(term)
+                df = doc_freq.get(term, 0)
+                idf = math.log((n_docs - df + 0.5) / (df + 0.5) + 1)
+                tf_norm = (tf * (bm25_k1 + 1)) / (
+                    tf + bm25_k1 * (1 - bm25_b + bm25_b * doc_len / max(avg_len, 1))
+                )
+                bm25_score += idf * tf_norm
 
-                # Score: term overlap with question
-                s_terms = set(re.findall(r'\b\w{3,}\b', sent.lower())) - stop_words
-                if not s_terms:
-                    continue
+            if bm25_score <= 0:
+                continue
 
-                overlap = len(q_terms & s_terms)
-                overlap_ratio = overlap / max(len(q_terms), 1)
+            # Normalize to 0-1 range (approximate)
+            max_possible = len(q_term_set) * math.log(n_docs + 1) * (bm25_k1 + 1)
+            score = min(bm25_score / max(max_possible, 1), 1.0)
 
-                # Bonus for informativeness (sentences that add information)
-                info_ratio = len(s_terms - q_terms) / max(len(s_terms), 1)
+            # Informativeness bonus: sentences that add beyond the query
+            info_ratio = len(s_terms - q_term_set) / max(len(s_terms), 1)
+            score = score * 0.8 + min(info_ratio, 0.8) * 0.2
 
-                # Combined score: high overlap + some new info
-                # Penalize pure question echoes (info_ratio too low)
-                # Penalize no overlap (overlap_ratio = 0)
-                score = overlap_ratio * 0.7 + min(info_ratio, 0.8) * 0.3
+            # Chunk rank discount (earlier chunks more relevant)
+            rank_discount = 1.0 / (1.0 + chunk_rank * 0.1)
+            score *= rank_discount
 
-                # Chunk rank penalty (earlier chunks are more relevant)
-                rank_discount = 1.0 / (1.0 + chunk_rank * 0.1)
-                score *= rank_discount
-
-                scored_sentences.append({
-                    "text": sent,
-                    "score": round(score, 4),
-                    "source": source,
-                    "chunk_rank": chunk_rank,
-                    "overlap_terms": sorted(q_terms & s_terms),
-                })
+            scored_sentences.append({
+                "text": sent,
+                "score": round(score, 4),
+                "source": source,
+                "chunk_rank": chunk_rank,
+                "overlap_terms": sorted(q_term_set & s_terms),
+            })
 
         # Sort by score and deduplicate near-identical sentences
         scored_sentences.sort(key=lambda x: -x["score"])
