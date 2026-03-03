@@ -1885,3 +1885,58 @@ class TestAnswerExtraction:
         result = pipeline.extract_answer("How do neural networks learn backpropagation?")
         scores = [s["score"] for s in result["answer_sentences"]]
         assert scores == sorted(scores, reverse=True)
+
+
+# ---- Query Decomposition Tests ----
+
+
+class TestQueryDecomposition:
+
+    def _make_pipeline(self) -> Pipeline:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        return Pipeline(store=store, search_index=search)
+
+    def test_simple_question_not_decomposed(self) -> None:
+        p = self._make_pipeline()
+        parts = p._decompose_question("What is deep learning?")
+        assert len(parts) >= 1
+        assert parts[0] == "What is deep learning?"
+
+    def test_conjunction_split(self) -> None:
+        p = self._make_pipeline()
+        parts = p._decompose_question("How do transformers work and what are their limitations?")
+        assert len(parts) >= 2
+        # Should have original + at least one sub-part
+        texts = " ".join(parts).lower()
+        assert "transformers" in texts
+        assert "limitations" in texts
+
+    def test_comparison_extraction(self) -> None:
+        p = self._make_pipeline()
+        parts = p._decompose_question("What is the difference between supervised and unsupervised learning?")
+        assert len(parts) >= 3
+        # Should extract both terms
+        texts = " ".join(parts).lower()
+        assert "supervised" in texts
+        assert "unsupervised" in texts
+
+    def test_temporal_decomposition(self) -> None:
+        p = self._make_pipeline()
+        parts = p._decompose_question("How has machine learning evolved over the decades?")
+        texts = " ".join(parts).lower()
+        assert "origins" in texts or "history" in texts
+        assert "current" in texts or "recent" in texts
+
+    def test_max_parts_respected(self) -> None:
+        p = self._make_pipeline()
+        parts = p._decompose_question(
+            "What is A and B and C and D and E and F?", max_parts=3)
+        assert len(parts) <= 3
+
+    def test_deduplication(self) -> None:
+        p = self._make_pipeline()
+        parts = p._decompose_question("Compare transformers vs transformers")
+        # Should not have duplicate sub-queries
+        normalized = [p.lower().strip() for p in parts]
+        assert len(set(normalized)) == len(normalized)

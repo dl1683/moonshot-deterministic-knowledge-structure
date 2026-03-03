@@ -3107,27 +3107,84 @@ class Pipeline:
     ) -> list[str]:
         """Decompose a complex question into simpler sub-questions.
 
-        Uses heuristic decomposition:
-        - Split on conjunctions (and, or, but)
-        - Extract distinct concepts
-        - Generate aspect-specific queries
+        Uses multi-strategy heuristic decomposition:
+        1. Clause splitting: "What is X and how does Y?" → two questions
+        2. Contrast extraction: "difference between A and B" → A, B, A vs B
+        3. Temporal decomposition: "how has X evolved?" → past, present, future
+        4. Conjunction splitting: "A and B and C" → separate queries
+        5. Entity extraction: pull out key noun phrases
         """
         import re
 
+        q = question.strip().rstrip("?.,!")
+        q_lower = q.lower()
         subqueries = [question]  # Always include the original
 
-        # Split on logical conjunctions
-        parts = re.split(r'\b(?:and|or|but|also|additionally|furthermore|moreover)\b', question, flags=re.IGNORECASE)
+        # Strategy 1: Question clause splitting
+        # "What is X and how does Y work?" → "What is X" + "how does Y work"
+        clause_splits = re.split(
+            r'[,;]\s*(?:and\s+)?(?:how|what|why|which|where|when|who)\b',
+            q, flags=re.IGNORECASE,
+        )
+        if len(clause_splits) > 1:
+            # Re-attach the question word that was consumed by split
+            for part in clause_splits:
+                part = part.strip().rstrip("?.,!")
+                if len(part) > 15:
+                    subqueries.append(part)
+
+        # Strategy 2: Contrast/comparison extraction
+        # "difference between A and B" → "A", "B", "A vs B"
+        contrast_match = re.search(
+            r'(?:difference|comparison|compare|contrast|tradeoff|trade-off)\s+'
+            r'(?:between\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(.+)',
+            q_lower,
+        )
+        if contrast_match:
+            a_term = contrast_match.group(1).strip().rstrip("?.,!")
+            b_term = contrast_match.group(2).strip().rstrip("?.,!")
+            if len(a_term) > 3:
+                subqueries.append(a_term)
+            if len(b_term) > 3:
+                subqueries.append(b_term)
+            subqueries.append(f"{a_term} vs {b_term}")
+
+        # Strategy 3: Temporal decomposition
+        # "how has X evolved?" → "X origins", "X current state"
+        temporal_match = re.search(
+            r'(?:how\s+has|how\s+have|how\s+did)\s+(.+?)\s+'
+            r'(?:evolved?|changed?|developed?|progressed?|grown?)',
+            q_lower,
+        )
+        if temporal_match:
+            topic = temporal_match.group(1).strip()
+            if len(topic) > 3:
+                subqueries.append(f"{topic} origins history")
+                subqueries.append(f"{topic} current state recent")
+
+        # Strategy 4: Conjunction splitting (broader than just "and")
+        parts = re.split(
+            r'\b(?:and|or|but|also|additionally|furthermore|moreover|as\s+well\s+as)\b',
+            q, flags=re.IGNORECASE,
+        )
         for part in parts:
             part = part.strip().rstrip("?.,!")
-            if len(part) > 15 and part.lower() != question.lower():
+            if len(part) > 15 and part.lower() != q_lower:
                 subqueries.append(part)
 
-        # Extract key noun phrases as additional queries
-        terms = self._extract_key_terms(question, max_terms=3)
-        for term in terms:
-            if len(term) > 5 and term.lower() not in question.lower()[:30].lower():
-                subqueries.append(term)
+        # Strategy 5: "relate to" / "impact on" extraction
+        relate_match = re.search(
+            r'(?:relat(?:e|ion|ionship)|impact|effect|influence|connection)\s+'
+            r'(?:between|of|on|to)\s+(.+?)\s+(?:and|on|to|with)\s+(.+)',
+            q_lower,
+        )
+        if relate_match:
+            a_term = relate_match.group(1).strip().rstrip("?.,!")
+            b_term = relate_match.group(2).strip().rstrip("?.,!")
+            if len(a_term) > 3:
+                subqueries.append(a_term)
+            if len(b_term) > 3:
+                subqueries.append(b_term)
 
         # Deduplicate while preserving order
         seen: set[str] = set()
