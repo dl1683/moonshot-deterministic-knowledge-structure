@@ -547,22 +547,34 @@ class Pipeline:
         self.store.to_canonical_json_file(str(directory / "store.json"))
 
         # 2. Save TF-IDF index state
-        if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index._tfidf
+        tfidf_component = None
+        dense_component = None
+
+        if isinstance(self._index, HybridSearchIndex):
+            tfidf_component = self._index._tfidf
+            dense_component = self._index._dense
+        elif isinstance(self._index, TfidfSearchIndex):
+            tfidf_component = self._index._tfidf
+        elif isinstance(self._index, DenseSearchIndex):
+            dense_component = self._index._dense
+
+        if tfidf_component is not None:
             tfidf_state = {
-                "texts": tfidf._texts,
-                "revision_ids": tfidf._revision_ids,
-                "fitted": tfidf._fitted,
+                "texts": tfidf_component._texts,
+                "revision_ids": tfidf_component._revision_ids,
+                "fitted": tfidf_component._fitted,
             }
             with open(directory / "tfidf_state.pkl", "wb") as f:
                 pickle.dump(tfidf_state, f)
-            # Save the fitted vectorizer separately
-            if tfidf._fitted:
+            if tfidf_component._fitted:
                 with open(directory / "tfidf_vectorizer.pkl", "wb") as f:
-                    pickle.dump(tfidf._vectorizer, f)
-                # Save the matrix
+                    pickle.dump(tfidf_component._vectorizer, f)
                 with open(directory / "tfidf_matrix.pkl", "wb") as f:
-                    pickle.dump(tfidf._matrix, f)
+                    pickle.dump(tfidf_component._matrix, f)
+
+        # 2b. Save dense embeddings
+        if dense_component is not None:
+            dense_component.save_embeddings(directory / "dense_embeddings.pkl")
 
         # 3. Save knowledge graph
         if hasattr(self, "_graph") and self._graph is not None:
@@ -581,13 +593,19 @@ class Pipeline:
                 pickle.dump(self._chunk_siblings, f)
 
         # 5. Save metadata
-        meta = {
-            "version": "0.4.0",
+        meta: dict[str, Any] = {
+            "version": "0.5.0",
             "cores": len(self.store.cores),
             "revisions": len(self.store.revisions),
             "tx_counter": self._tx_counter,
         }
-        if isinstance(self._index, TfidfSearchIndex):
+        if isinstance(self._index, HybridSearchIndex):
+            meta["index_type"] = "hybrid"
+            meta["indexed"] = self._index._dense.size
+        elif isinstance(self._index, DenseSearchIndex):
+            meta["index_type"] = "dense"
+            meta["indexed"] = self._index._dense.size
+        elif isinstance(self._index, TfidfSearchIndex):
             meta["index_type"] = "tfidf"
             meta["indexed"] = self._index.size
         if hasattr(self, "_graph") and self._graph is not None:
@@ -622,9 +640,13 @@ class Pipeline:
         with open(directory / "meta.json") as f:
             meta = json.load(f)
 
-        # 3. Restore TF-IDF index
+        # 3. Restore search index
         search_index = None
-        if meta.get("index_type") == "tfidf" and (directory / "tfidf_state.pkl").exists():
+        index_type = meta.get("index_type", "tfidf")
+
+        # 3a. Restore TF-IDF component (used by tfidf and hybrid)
+        tfidf = None
+        if (directory / "tfidf_state.pkl").exists():
             from .index import TfidfIndex
 
             with open(directory / "tfidf_state.pkl", "rb") as f:
@@ -645,6 +667,38 @@ class Pipeline:
                 tfidf._vectorizer = TfidfVectorizer()
                 tfidf._matrix = None
 
+        # 3b. Restore dense component (used by dense and hybrid)
+        dense = None
+        if (directory / "dense_embeddings.pkl").exists():
+            from .index import SentenceTransformerIndex
+            dense = SentenceTransformerIndex.__new__(SentenceTransformerIndex)
+            # Set defaults before loading
+            dense._batch_size = 64
+            dense._dirty = True
+            try:
+                from sentence_transformers import SentenceTransformer
+                dense._model = SentenceTransformer("all-MiniLM-L6-v2")
+                dense._dimension = dense._model.get_sentence_embedding_dimension()
+            except ImportError:
+                dense._model = None
+                dense._dimension = 384
+            dense.load_embeddings(directory / "dense_embeddings.pkl")
+
+        # 3c. Assemble the correct index type
+        if index_type == "hybrid" and tfidf is not None and dense is not None:
+            from .index import HybridSearchIndex
+            search_index = HybridSearchIndex.__new__(HybridSearchIndex)
+            search_index._store = store
+            search_index._tfidf = tfidf
+            search_index._dense = dense
+            search_index._alpha = 0.5
+            search_index._rrf_k = 60
+        elif index_type == "dense" and dense is not None:
+            from .index import DenseSearchIndex
+            search_index = DenseSearchIndex.__new__(DenseSearchIndex)
+            search_index._store = store
+            search_index._dense = dense
+        elif tfidf is not None:
             search_index = TfidfSearchIndex.__new__(TfidfSearchIndex)
             search_index._store = store
             search_index._tfidf = tfidf

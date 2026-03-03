@@ -1282,3 +1282,63 @@ class TestProvenanceCitation:
         # Only tx_id=1 visible — should only see attention paper
         results = pipeline.query_by_source("attention", valid_at=dt(2025), tx_id=1)
         assert len(results) >= 1
+
+
+# ---- Save/Load Persistence Tests ----
+
+
+class TestPipelinePersistence:
+    """Test save/load round-trip for all index types."""
+
+    def test_tfidf_save_load(self) -> None:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        core = ClaimCore(claim_type="fact@v1", slots={"subject": "ai", "source": "test"})
+        rev = store.assert_revision(
+            core=core, assertion="neural networks use gradient descent",
+            valid_time=ValidTime(start=dt(2024)),
+            transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+            provenance=Provenance(source="test"), confidence_bp=5000, status="asserted",
+        )
+        search.add(rev.revision_id, rev.assertion)
+        search.rebuild()
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline.save(tmpdir)
+            loaded = Pipeline.load(tmpdir)
+            results = loaded.query("neural networks gradient", k=1)
+            assert len(results) >= 1
+            assert "gradient" in results[0].text
+
+    def test_save_load_preserves_chunk_siblings(self) -> None:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        rids = []
+        for i in range(3):
+            core = ClaimCore(claim_type="fact@v1", slots={"subject": f"chunk{i}", "source": "doc"})
+            rev = store.assert_revision(
+                core=core, assertion=f"chunk {i} content about topic {i}",
+                valid_time=ValidTime(start=dt(2024)),
+                transaction_time=TransactionTime(tx_id=i+1, recorded_at=dt(2024)),
+                provenance=Provenance(source="doc"), confidence_bp=5000, status="asserted",
+            )
+            rids.append(rev.revision_id)
+            search.add(rev.revision_id, rev.assertion)
+        search.rebuild()
+        pipeline._chunk_siblings["doc"] = rids
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline.save(tmpdir)
+            loaded = Pipeline.load(tmpdir)
+            assert "doc" in loaded._chunk_siblings
+            assert loaded._chunk_siblings["doc"] == rids

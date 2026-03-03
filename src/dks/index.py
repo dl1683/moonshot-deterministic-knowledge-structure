@@ -699,6 +699,38 @@ class SentenceTransformerIndex:
                 ))
         return results
 
+    def save_embeddings(self, path: str | Path) -> None:
+        """Save embeddings, texts, and revision IDs to disk.
+
+        Saves the precomputed embeddings so they don't need to be
+        recomputed on reload. Much faster than re-encoding all texts.
+        """
+        import pickle
+        if self._dirty or self._embeddings is None:
+            self.rebuild()
+        state = {
+            "texts": self._texts,
+            "revision_ids": self._revision_ids,
+            "embeddings": self._embeddings,
+            "model_name": self._model.model_card_data.model_name if hasattr(self._model, 'model_card_data') else "unknown",
+            "dimension": self._dimension,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+
+    def load_embeddings(self, path: str | Path) -> None:
+        """Load saved embeddings from disk.
+
+        Restores precomputed embeddings, skipping the expensive encoding step.
+        """
+        import pickle
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+        self._texts = state["texts"]
+        self._revision_ids = state["revision_ids"]
+        self._embeddings = state["embeddings"]
+        self._dirty = False
+
     @property
     def size(self) -> int:
         return len(self._texts)
