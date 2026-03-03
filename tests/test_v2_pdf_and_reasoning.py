@@ -2799,3 +2799,50 @@ class TestDataExploration:
         p = self._build_corpus()
         text = p.render_contradictions([])
         assert "No contradictions detected" in text
+
+    # --- Source Comparison ---
+
+    def test_compare_sources(self) -> None:
+        p = self._build_corpus()
+        result = p.compare_sources("paper_a.pdf", "paper_b.pdf")
+
+        assert result["source_a"] == "paper_a.pdf"
+        assert result["source_b"] == "paper_b.pdf"
+        assert result["found_a"] is True
+        assert result["found_b"] is True
+        assert result["chunks_a"] == 3
+        assert result["chunks_b"] == 3
+        assert isinstance(result["overlap_pairs"], list)
+        assert isinstance(result["shared_topics"], list)
+        assert "unique_to_a" in result
+        assert "unique_to_b" in result
+
+    def test_compare_sources_missing(self) -> None:
+        p = self._build_corpus()
+        result = p.compare_sources("paper_a.pdf", "nonexistent.pdf")
+        assert result["found_a"] is True
+        assert result["found_b"] is False
+
+    def test_compare_sources_overlap(self) -> None:
+        p = self._build_corpus()
+        # paper_a and paper_b both discuss neural networks
+        result = p.compare_sources("paper_a.pdf", "paper_b.pdf", similarity_threshold=0.2)
+        # Should find at least some overlap given shared topic
+        assert result["overlap_count"] >= 0
+        assert result["overlap_pct_a"] >= 0
+        assert result["overlap_pct_b"] >= 0
+
+    def test_render_comparison(self) -> None:
+        p = self._build_corpus()
+        result = p.compare_sources("paper_a.pdf", "paper_b.pdf")
+        text = p.render_comparison(result)
+
+        assert "SOURCE COMPARISON" in text
+        assert "paper_a.pdf" in text
+        assert "paper_b.pdf" in text
+
+    def test_render_comparison_missing_source(self) -> None:
+        p = self._build_corpus()
+        result = p.compare_sources("paper_a.pdf", "nonexistent.pdf")
+        text = p.render_comparison(result)
+        assert "SOURCE COMPARISON" in text

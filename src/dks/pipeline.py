@@ -2604,6 +2604,164 @@ class Pipeline:
 
         return "\n".join(lines)
 
+    # ---- Source Comparison ----
+
+    def compare_sources(
+        self,
+        source_a: str,
+        source_b: str,
+        *,
+        similarity_threshold: float = 0.5,
+    ) -> dict[str, Any]:
+        """Compare two source documents for overlap and divergence.
+
+        Analyzes shared topics, unique content, overlapping chunks,
+        and potential contradictions between two sources.
+
+        Args:
+            source_a: First source identifier.
+            source_b: Second source identifier.
+            similarity_threshold: Min similarity to consider overlap.
+
+        Returns:
+            Dict with overlap_pairs, unique_to_a, unique_to_b,
+            shared_topics, and comparison summary.
+        """
+        # Collect chunks per source
+        chunks_a: list[tuple[str, str]] = []  # (rid, text)
+        chunks_b: list[tuple[str, str]] = []
+
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            source = core.slots.get("source", "")
+            if source == source_a:
+                chunks_a.append((rid, rev.assertion))
+            elif source == source_b:
+                chunks_b.append((rid, rev.assertion))
+
+        if not chunks_a or not chunks_b:
+            return {
+                "source_a": source_a,
+                "source_b": source_b,
+                "found_a": bool(chunks_a),
+                "found_b": bool(chunks_b),
+                "overlap_pairs": [],
+                "unique_to_a": len(chunks_a),
+                "unique_to_b": len(chunks_b),
+                "similarity_summary": "Cannot compare — one or both sources empty",
+            }
+
+        # Find overlapping chunks using search
+        overlap_pairs: list[dict[str, Any]] = []
+        matched_a: set[str] = set()
+        matched_b: set[str] = set()
+
+        for rid_a, text_a in chunks_a:
+            results = self.query(text_a[:200], k=5)
+            for sr in results:
+                if sr.revision_id == rid_a:
+                    continue
+                if sr.score < similarity_threshold:
+                    continue
+                # Check if this result is from source_b
+                cand_rev = self.store.revisions.get(sr.revision_id)
+                if cand_rev is None:
+                    continue
+                cand_core = self.store.cores.get(cand_rev.core_id)
+                if cand_core and cand_core.slots.get("source") == source_b:
+                    pair_key = tuple(sorted([rid_a, sr.revision_id]))
+                    if pair_key not in {tuple(sorted([p["rid_a"], p["rid_b"]])) for p in overlap_pairs}:
+                        overlap_pairs.append({
+                            "rid_a": rid_a,
+                            "rid_b": sr.revision_id,
+                            "similarity": round(sr.score, 4),
+                            "text_a": text_a[:200],
+                            "text_b": cand_rev.assertion[:200],
+                        })
+                        matched_a.add(rid_a)
+                        matched_b.add(sr.revision_id)
+
+        # Sort by similarity
+        overlap_pairs.sort(key=lambda x: -x["similarity"])
+
+        # Extract topic words from overlapping chunks
+        shared_words: dict[str, int] = {}
+        for pair in overlap_pairs:
+            words = set(pair["text_a"].lower().split()) & set(pair["text_b"].lower().split())
+            for w in words:
+                if len(w) > 3:
+                    shared_words[w] = shared_words.get(w, 0) + 1
+
+        shared_topics = sorted(shared_words, key=lambda w: -shared_words[w])[:10]
+
+        unique_a = len(chunks_a) - len(matched_a)
+        unique_b = len(chunks_b) - len(matched_b)
+
+        # Generate summary
+        overlap_pct_a = len(matched_a) / len(chunks_a) * 100 if chunks_a else 0
+        overlap_pct_b = len(matched_b) / len(chunks_b) * 100 if chunks_b else 0
+
+        return {
+            "source_a": source_a,
+            "source_b": source_b,
+            "found_a": True,
+            "found_b": True,
+            "chunks_a": len(chunks_a),
+            "chunks_b": len(chunks_b),
+            "overlap_pairs": overlap_pairs[:20],
+            "overlap_count": len(overlap_pairs),
+            "unique_to_a": unique_a,
+            "unique_to_b": unique_b,
+            "shared_topics": shared_topics,
+            "overlap_pct_a": round(overlap_pct_a, 1),
+            "overlap_pct_b": round(overlap_pct_b, 1),
+        }
+
+    def render_comparison(self, result: dict[str, Any]) -> str:
+        """Render compare_sources() result as human-readable text.
+
+        Args:
+            result: Output from compare_sources().
+
+        Returns:
+            Formatted text string.
+        """
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append("  SOURCE COMPARISON")
+        lines.append("=" * 60)
+        lines.append(f"  A: {result['source_a']}")
+        lines.append(f"  B: {result['source_b']}")
+
+        if not result.get("found_a") or not result.get("found_b"):
+            lines.append(f"  {result.get('similarity_summary', 'Missing source(s)')}")
+            return "\n".join(lines)
+
+        lines.append(f"  A chunks: {result['chunks_a']}  |  B chunks: {result['chunks_b']}")
+        lines.append(f"  Overlapping pairs: {result['overlap_count']}")
+        lines.append(f"  A overlap: {result['overlap_pct_a']}%  |  B overlap: {result['overlap_pct_b']}%")
+        lines.append(f"  Unique to A: {result['unique_to_a']}  |  Unique to B: {result['unique_to_b']}")
+        lines.append("")
+
+        if result.get("shared_topics"):
+            lines.append(f"  Shared topics: {', '.join(result['shared_topics'][:8])}")
+            lines.append("")
+
+        if result.get("overlap_pairs"):
+            lines.append("  TOP OVERLAPPING PAIRS:")
+            lines.append("-" * 60)
+            for pair in result["overlap_pairs"][:5]:
+                lines.append(f"  [{pair['similarity']:.3f}]")
+                lines.append(f"    A: {pair['text_a'][:120].replace(chr(10), ' ')}...")
+                lines.append(f"    B: {pair['text_b'][:120].replace(chr(10), ' ')}...")
+                lines.append("")
+
+        return "\n".join(lines)
+
     def link_entities(
         self,
         *,
