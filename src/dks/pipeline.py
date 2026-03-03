@@ -1666,6 +1666,295 @@ class Pipeline:
             total_chunks=len(expanded),
         )
 
+    # ---- Contradiction Detection ----
+
+    def contradictions(
+        self,
+        topic: str,
+        *,
+        k: int = 20,
+        similarity_threshold: float = 0.15,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Find potential contradictions in the knowledge base about a topic.
+
+        Searches for chunks that are topically similar but come from different
+        sources, then applies negation and opposition detection to find conflicts.
+
+        Args:
+            topic: Topic to search for contradictions.
+            k: Number of chunks to analyze.
+            similarity_threshold: Minimum TF-IDF similarity between chunks.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
+
+        Returns:
+            List of contradiction dicts, each with:
+              - chunk_a: SearchResult
+              - chunk_b: SearchResult
+              - source_a: str
+              - source_b: str
+              - similarity: float (topical similarity)
+              - conflict_signals: list[str] (what triggered the detection)
+              - confidence_bp: int (0-10000, how likely this is a real contradiction)
+        """
+        import re
+
+        if self._index is None:
+            raise ValueError("No search index configured.")
+
+        results = self.query(topic, k=k, valid_at=valid_at, tx_id=tx_id)
+        if len(results) < 2:
+            return []
+
+        # Get source for each result
+        result_sources: dict[str, str] = {}
+        for r in results:
+            core = self.store.cores.get(r.core_id)
+            result_sources[r.revision_id] = (
+                core.slots.get("source", "unknown") if core else "unknown"
+            )
+
+        # Compute pairwise similarity using TF-IDF
+        tfidf = None
+        if isinstance(self._index, TfidfSearchIndex):
+            tfidf = self._index._tfidf
+        elif isinstance(self._index, HybridSearchIndex):
+            tfidf = self._index._tfidf
+
+        pairs_with_similarity: list[tuple[int, int, float]] = []
+
+        if tfidf is not None and tfidf._fitted:
+            try:
+                from sklearn.metrics.pairwise import cosine_similarity
+                texts = [r.text for r in results]
+                vecs = tfidf._vectorizer.transform(texts)
+                sim_matrix = cosine_similarity(vecs)
+
+                for i in range(len(results)):
+                    for j in range(i + 1, len(results)):
+                        sim = float(sim_matrix[i][j])
+                        if sim >= similarity_threshold:
+                            # Only consider cross-source pairs
+                            if result_sources[results[i].revision_id] != result_sources[results[j].revision_id]:
+                                pairs_with_similarity.append((i, j, sim))
+            except Exception:
+                pass
+
+        if not pairs_with_similarity:
+            # Fallback: compare all cross-source pairs
+            for i in range(len(results)):
+                for j in range(i + 1, len(results)):
+                    if result_sources[results[i].revision_id] != result_sources[results[j].revision_id]:
+                        pairs_with_similarity.append((i, j, 0.5))
+
+        # Detect contradiction signals
+        negation_words = {
+            "not", "no", "never", "neither", "nor", "none", "nothing",
+            "nowhere", "hardly", "scarcely", "barely", "doesn't", "don't",
+            "didn't", "won't", "wouldn't", "couldn't", "shouldn't",
+            "isn't", "aren't", "wasn't", "weren't", "cannot", "can't",
+        }
+        opposition_pairs = [
+            ("increase", "decrease"), ("improve", "worsen"), ("better", "worse"),
+            ("higher", "lower"), ("more", "less"), ("faster", "slower"),
+            ("larger", "smaller"), ("stronger", "weaker"), ("efficient", "inefficient"),
+            ("effective", "ineffective"), ("successful", "unsuccessful"),
+            ("advantage", "disadvantage"), ("benefit", "drawback"),
+            ("outperform", "underperform"), ("superior", "inferior"),
+            ("significant", "insignificant"), ("positive", "negative"),
+            ("optimal", "suboptimal"), ("accurate", "inaccurate"),
+        ]
+
+        contradictions: list[dict[str, Any]] = []
+
+        for i, j, sim in pairs_with_similarity:
+            a, b = results[i], results[j]
+            a_words = set(re.findall(r'\b\w+\b', a.text.lower()))
+            b_words = set(re.findall(r'\b\w+\b', b.text.lower()))
+
+            signals: list[str] = []
+            confidence = 0
+
+            # Signal 1: One has negation of shared concept
+            a_negations = a_words & negation_words
+            b_negations = b_words & negation_words
+            if a_negations and not b_negations:
+                signals.append(f"negation in A: {', '.join(a_negations)}")
+                confidence += 2000
+            elif b_negations and not a_negations:
+                signals.append(f"negation in B: {', '.join(b_negations)}")
+                confidence += 2000
+
+            # Signal 2: Opposition word pairs
+            for pos, neg in opposition_pairs:
+                if pos in a_words and neg in b_words:
+                    signals.append(f"opposition: A='{pos}' vs B='{neg}'")
+                    confidence += 3000
+                elif neg in a_words and pos in b_words:
+                    signals.append(f"opposition: A='{neg}' vs B='{pos}'")
+                    confidence += 3000
+
+            # Signal 3: Numerical disagreement on same topic
+            a_nums = set(re.findall(r'\b\d+(?:\.\d+)?%?\b', a.text))
+            b_nums = set(re.findall(r'\b\d+(?:\.\d+)?%?\b', b.text))
+            shared_context = a_words & b_words - negation_words
+            if a_nums and b_nums and a_nums != b_nums and len(shared_context) > 5:
+                signals.append(f"different numbers: A={a_nums} vs B={b_nums}")
+                confidence += 1500
+
+            # Signal 4: High topical similarity + different sources = potential conflict
+            if sim > 0.4:
+                signals.append(f"high similarity ({sim:.2f}) across sources")
+                confidence += 1000
+
+            if signals:
+                confidence = min(confidence, 10000)
+                contradictions.append({
+                    "chunk_a": a,
+                    "chunk_b": b,
+                    "source_a": result_sources[a.revision_id],
+                    "source_b": result_sources[b.revision_id],
+                    "similarity": sim,
+                    "conflict_signals": signals,
+                    "confidence_bp": confidence,
+                })
+
+        # Sort by confidence
+        contradictions.sort(key=lambda c: -c["confidence_bp"])
+        return contradictions
+
+    def confidence(
+        self,
+        claim: str,
+        *,
+        k: int = 10,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Assess confidence in a claim based on evidence in the store.
+
+        Scores a claim based on:
+        1. Source diversity (more independent sources = higher confidence)
+        2. Internal consistency (do sources agree?)
+        3. Recency (newer evidence weighted higher)
+        4. Evidence density (how many relevant chunks found)
+
+        Args:
+            claim: Factual claim to evaluate.
+            k: Number of chunks to analyze.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
+
+        Returns:
+            Dict with:
+              - confidence_bp: int (0-10000)
+              - evidence_count: int
+              - source_count: int
+              - supporting: int (chunks that support)
+              - contradicting: int (chunks with contradiction signals)
+              - recency_score: float (0-1, how recent the evidence is)
+              - assessment: str ("high", "medium", "low", "insufficient")
+        """
+        import re
+
+        if self._index is None:
+            raise ValueError("No search index configured.")
+
+        results = self.query(claim, k=k, valid_at=valid_at, tx_id=tx_id)
+        if not results:
+            return {
+                "confidence_bp": 0,
+                "evidence_count": 0,
+                "source_count": 0,
+                "supporting": 0,
+                "contradicting": 0,
+                "recency_score": 0.0,
+                "assessment": "insufficient",
+            }
+
+        # Count unique sources
+        sources: set[str] = set()
+        for r in results:
+            core = self.store.cores.get(r.core_id)
+            if core:
+                sources.add(core.slots.get("source", "unknown"))
+
+        # Check for negation/contradiction signals vs the claim
+        claim_words = set(re.findall(r'\b\w+\b', claim.lower()))
+        negation_words = {
+            "not", "no", "never", "neither", "nor", "none",
+            "doesn't", "don't", "didn't", "won't", "cannot", "can't",
+        }
+        claim_has_negation = bool(claim_words & negation_words)
+
+        supporting = 0
+        contradicting = 0
+        for r in results:
+            r_words = set(re.findall(r'\b\w+\b', r.text.lower()))
+            r_has_negation = bool(r_words & negation_words)
+
+            # If claim is positive and evidence is negative (or vice versa)
+            if claim_has_negation != r_has_negation:
+                contradicting += 1
+            else:
+                supporting += 1
+
+        # Recency score: based on transaction times of evidence
+        recency_scores = []
+        for r in results:
+            rev = self.store.revisions.get(r.revision_id)
+            if rev:
+                tx_recorded = rev.transaction_time.recorded_at
+                # Score based on how recent (within last 5 years)
+                now = datetime.now(timezone.utc)
+                age_days = (now - tx_recorded).days
+                recency = max(0.0, 1.0 - age_days / (365 * 5))
+                recency_scores.append(recency)
+        recency_score = sum(recency_scores) / len(recency_scores) if recency_scores else 0.0
+
+        # Compute overall confidence
+        confidence = 0
+
+        # Source diversity (0-3000)
+        source_score = min(len(sources) * 1000, 3000)
+        confidence += source_score
+
+        # Evidence density (0-2000)
+        density_score = min(len(results) * 400, 2000)
+        confidence += density_score
+
+        # Consistency (0-3000)
+        if supporting > 0:
+            consistency = supporting / (supporting + contradicting)
+            confidence += int(consistency * 3000)
+
+        # Recency boost (0-2000)
+        confidence += int(recency_score * 2000)
+
+        confidence = min(confidence, 10000)
+
+        # Assessment
+        if len(results) < 2:
+            assessment = "insufficient"
+        elif confidence >= 7000:
+            assessment = "high"
+        elif confidence >= 4000:
+            assessment = "medium"
+        else:
+            assessment = "low"
+
+        return {
+            "confidence_bp": confidence,
+            "evidence_count": len(results),
+            "source_count": len(sources),
+            "supporting": supporting,
+            "contradicting": contradicting,
+            "recency_score": round(recency_score, 3),
+            "assessment": assessment,
+        }
+
     def _decompose_question(
         self,
         question: str,

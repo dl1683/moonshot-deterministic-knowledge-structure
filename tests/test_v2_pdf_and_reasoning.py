@@ -1057,3 +1057,117 @@ class TestTemporalRetrieval:
         )
         all_texts = [r.text for r in chain.direct_evidence + chain.related_evidence]
         assert not any("transformers revolutionized" in t for t in all_texts)
+
+
+# ---- Contradiction Detection & Confidence Tests ----
+
+
+class TestContradictionDetection:
+    """Test contradiction detection and confidence scoring."""
+
+    def _make_pipeline(self) -> Pipeline:
+        """Build a pipeline with contradictory claims from different sources."""
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        claims = [
+            # Contradictory pair: performance claims about transformers
+            ("transformers achieve higher accuracy than recurrent neural networks on language tasks",
+             "paper_a"),
+            ("recurrent neural networks are not outperformed by transformers on language tasks",
+             "paper_b"),
+            # Supporting claims from different sources
+            ("deep learning models require large datasets for effective training",
+             "paper_c"),
+            ("neural networks need large amounts of training data to perform well",
+             "paper_d"),
+            # Numerical disagreement
+            ("the model achieved 95% accuracy on the benchmark dataset",
+             "paper_e"),
+            ("the model achieved 78% accuracy on the benchmark dataset",
+             "paper_f"),
+        ]
+
+        for i, (text, source) in enumerate(claims):
+            core = ClaimCore(claim_type="fact@v1", slots={"subject": "ml", "source": source})
+            rev = store.assert_revision(
+                core=core,
+                assertion=text,
+                valid_time=ValidTime(start=dt(2024)),
+                transaction_time=TransactionTime(tx_id=i + 1, recorded_at=dt(2024, i + 1, 1)),
+                provenance=Provenance(source=source),
+                confidence_bp=5000,
+                status="asserted",
+            )
+            search.add(rev.revision_id, rev.assertion)
+
+        search.rebuild()
+        return pipeline
+
+    def test_contradictions_returns_list(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.contradictions("neural networks transformers language")
+        assert isinstance(result, list)
+
+    def test_contradictions_finds_negation(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.contradictions("transformers recurrent neural networks language")
+        # Should find the contradiction between paper_a and paper_b
+        assert len(result) > 0
+        # At least one should have negation signal
+        all_signals = [s for c in result for s in c["conflict_signals"]]
+        assert any("negation" in s or "opposition" in s for s in all_signals)
+
+    def test_contradictions_cross_source_only(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.contradictions("neural networks")
+        # All contradictions should be cross-source
+        for c in result:
+            assert c["source_a"] != c["source_b"]
+
+    def test_contradictions_has_confidence(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.contradictions("transformers neural networks")
+        for c in result:
+            assert 0 <= c["confidence_bp"] <= 10000
+
+    def test_contradictions_sorted_by_confidence(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.contradictions("transformers neural networks accuracy")
+        if len(result) > 1:
+            for i in range(len(result) - 1):
+                assert result[i]["confidence_bp"] >= result[i + 1]["confidence_bp"]
+
+    def test_confidence_returns_assessment(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.confidence("deep learning requires large datasets")
+        assert "confidence_bp" in result
+        assert "assessment" in result
+        assert result["assessment"] in ("high", "medium", "low", "insufficient")
+        assert result["evidence_count"] > 0
+
+    def test_confidence_with_supporting_evidence(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.confidence("neural networks need large training data")
+        assert result["supporting"] > 0
+        assert result["source_count"] >= 1
+
+    def test_confidence_insufficient_for_unknown(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.confidence("quantum teleportation of cat brains")
+        assert result["evidence_count"] == 0
+        assert result["assessment"] == "insufficient"
+
+    def test_contradictions_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        # Only tx_id 1-2 visible
+        result = pipeline.contradictions(
+            "transformers neural networks",
+            valid_at=dt(2025),
+            tx_id=2,
+        )
+        # Should still work with temporal filtering
+        assert isinstance(result, list)
