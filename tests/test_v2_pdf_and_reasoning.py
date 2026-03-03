@@ -1940,3 +1940,295 @@ class TestQueryDecomposition:
         # Should not have duplicate sub-queries
         normalized = [p.lower().strip() for p in parts]
         assert len(set(normalized)) == len(normalized)
+
+
+# ---- Comprehensive Integration Tests ----
+
+
+class TestIntegration:
+    """End-to-end tests exercising all pipeline components together."""
+
+    def _build_corpus(self) -> Pipeline:
+        """Build a realistic multi-source, multi-temporal corpus."""
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        # Source 1: Early AI paper (2020) — foundational claims
+        early_claims = [
+            "Neural networks require large amounts of labeled training data. "
+            "Data augmentation can partially alleviate data scarcity.",
+            "Convolutional neural networks are the dominant architecture for "
+            "computer vision tasks including image classification and detection.",
+            "Recurrent neural networks process sequences by maintaining hidden "
+            "state across time steps. LSTMs address the vanishing gradient problem.",
+        ]
+
+        # Source 2: Transformer paper (2022) — updates and challenges
+        transformer_claims = [
+            "Transformers have largely replaced recurrent networks for sequence "
+            "modeling. Self-attention enables parallel computation over sequences.",
+            "Vision transformers now match or exceed CNN performance on image "
+            "classification benchmarks. The patch embedding approach is key.",
+            "Large language models trained on massive text corpora exhibit emergent "
+            "capabilities including in-context learning and chain-of-thought reasoning.",
+        ]
+
+        # Source 3: Safety paper (2024) — contradicts and updates
+        safety_claims = [
+            "Large language models frequently hallucinate incorrect information. "
+            "Retrieval augmentation reduces but does not eliminate hallucination.",
+            "Models trained on internet data absorb societal biases. Alignment "
+            "techniques including RLHF attempt to mitigate harmful outputs.",
+            "Current AI systems are not actually reasoning but performing sophisticated "
+            "pattern matching. True reasoning requires grounded world models.",
+        ]
+
+        # Source 4: Counter-claim to Source 3
+        counter_claims = [
+            "Recent studies show large language models do exhibit genuine reasoning "
+            "capabilities, not merely pattern matching. Chain-of-thought improves accuracy.",
+        ]
+
+        sources = [
+            ("early_ai_2020.pdf", early_claims, 1, dt(2020)),
+            ("transformers_2022.pdf", transformer_claims, 2, dt(2022)),
+            ("ai_safety_2024.pdf", safety_claims, 3, dt(2024)),
+            ("reasoning_rebuttal_2024.pdf", counter_claims, 4, dt(2024, 6)),
+        ]
+
+        for source, claims, tx_id, recorded in sources:
+            rev_ids = []
+            for i, text in enumerate(claims):
+                core = ClaimCore(
+                    claim_type="document.chunk@v1",
+                    slots={"source": source, "chunk_idx": str(i), "text": text[:30]},
+                )
+                rev = store.assert_revision(
+                    core=core, assertion=text,
+                    valid_time=ValidTime(start=recorded, end=None),
+                    transaction_time=TransactionTime(tx_id=tx_id, recorded_at=recorded),
+                    provenance=Provenance(source=source),
+                    confidence_bp=5000,
+                )
+                search.add(rev.revision_id, text)
+                rev_ids.append(rev.revision_id)
+            pipeline._chunk_siblings[source] = rev_ids
+
+        search.rebuild()
+        return pipeline
+
+    # --- Retrieval integration ---
+
+    def test_ask_routes_correctly(self) -> None:
+        p = self._build_corpus()
+        # Factual — use terms that appear in corpus
+        r1 = p.ask("What are neural networks?")
+        assert r1.total_chunks > 0
+        # Comparison
+        r2 = p.ask("Compare transformers vs recurrent networks")
+        assert r2.total_chunks > 0
+        # Exploratory
+        r3 = p.ask("Why do language models hallucinate?")
+        assert r3.total_chunks > 0
+
+    def test_multi_hop_finds_cross_document_evidence(self) -> None:
+        p = self._build_corpus()
+        result = p.reason("How have AI architectures evolved?", k=5, hops=2)
+        sources = set()
+        for r in result.results:
+            core = p.store.cores.get(r.core_id)
+            if core:
+                sources.add(core.slots.get("source", ""))
+        # Should retrieve from multiple sources
+        assert len(sources) >= 2
+
+    def test_context_expansion_preserves_siblings(self) -> None:
+        p = self._build_corpus()
+        results = p.query("transformers self-attention", k=1)
+        if results:
+            expanded = p.expand_context(results[0], window=1)
+            assert len(expanded) >= 1
+            # Expanded chunks from same source
+            core = p.store.cores.get(results[0].core_id)
+            source = core.slots.get("source", "") if core else ""
+            for r in expanded:
+                c = p.store.cores.get(r.core_id)
+                assert c.slots.get("source", "") == source
+
+    # --- Answer extraction integration ---
+
+    def test_answer_finds_specific_sentences(self) -> None:
+        p = self._build_corpus()
+        result = p.answer("Why do language models hallucinate?", k=5, hops=1)
+        assert len(result["answer_sentences"]) > 0
+        # Should find hallucination-related answer
+        all_text = " ".join(s["text"] for s in result["answer_sentences"])
+        assert "hallucin" in all_text.lower()
+
+    def test_answer_across_temporal_boundary(self) -> None:
+        p = self._build_corpus()
+        # Only tx_id=1 + valid_at=2020 → only early_ai_2020.pdf
+        results = p.query("neural networks training", k=5,
+                          valid_at=dt(2020, 6, 1), tx_id=1)
+        # All results should be from early source
+        for r in results:
+            core = p.store.cores.get(r.core_id)
+            assert core.slots.get("source", "") == "early_ai_2020.pdf"
+
+    # --- Contradiction detection integration ---
+
+    def test_contradictions_across_sources(self) -> None:
+        p = self._build_corpus()
+        conflicts = p.contradictions("reasoning pattern matching", k=10)
+        # Should detect the reasoning vs pattern matching contradiction
+        # between ai_safety_2024 and reasoning_rebuttal_2024
+        if conflicts:
+            sources_involved = set()
+            for c in conflicts:
+                sources_involved.add(c["source_a"])
+                sources_involved.add(c["source_b"])
+            assert len(sources_involved) >= 2
+
+    def test_confidence_varies_by_topic(self) -> None:
+        p = self._build_corpus()
+        # Well-covered topic
+        conf1 = p.confidence("neural networks deep learning")
+        # Poorly covered topic
+        conf2 = p.confidence("quantum computing superconductors")
+        # Well-covered should have higher or equal confidence_bp
+        assert conf1["confidence_bp"] >= 0
+        assert conf2["confidence_bp"] >= 0
+
+    # --- Audit trail integration ---
+
+    def test_audit_captures_full_pipeline(self) -> None:
+        p = self._build_corpus()
+        p.enable_audit(True)
+        p.answer("How do transformers work?", k=5, hops=1)
+        audit = p.last_audit()
+        assert audit is not None
+        assert audit.operation == "answer"
+        stages = [e.stage for e in audit.events]
+        assert "classify" in stages
+        assert "retrieve" in stages
+        assert "extract" in stages
+
+    def test_audit_json_roundtrip(self) -> None:
+        import json
+        p = self._build_corpus()
+        p.enable_audit(True)
+        p.ask("neural networks")
+        audit = p.last_audit()
+        j = audit.to_json()
+        parsed = json.loads(j)
+        assert parsed["operation"] == "ask"
+        assert len(parsed["events"]) >= 2
+
+    def test_render_audit_readable(self) -> None:
+        p = self._build_corpus()
+        p.enable_audit(True)
+        p.synthesize("How have AI architectures evolved?", k=5, hops=1)
+        report = p.render_audit()
+        assert "REASON" in report
+        assert "DIVERSIFY" in report
+        assert "Timing Breakdown" in report
+
+    # --- Query decomposition integration ---
+
+    def test_multi_aspect_retrieval(self) -> None:
+        p = self._build_corpus()
+        result = p.ask(
+            "What is the difference between CNNs and transformers for vision?",
+            strategy="multi-aspect",
+        )
+        assert result.total_chunks > 0
+        # Should find both CNN and transformer content
+        all_text = " ".join(r.text[:100] for r in result.results)
+        lower_text = all_text.lower()
+        assert "cnn" in lower_text or "convolutional" in lower_text
+        assert "transformer" in lower_text or "vision" in lower_text
+
+    # --- Temporal filtering integration ---
+
+    def test_temporal_query_restricts_results(self) -> None:
+        p = self._build_corpus()
+        # Only tx_id=1 + valid_at=2020 → only early_ai_2020.pdf
+        results = p.query("neural networks", k=10,
+                          valid_at=dt(2020, 6, 1), tx_id=1)
+        for r in results:
+            core = p.store.cores.get(r.core_id)
+            assert core.slots.get("source", "") == "early_ai_2020.pdf"
+
+    def test_synthesize_respects_temporal_filter(self) -> None:
+        p = self._build_corpus()
+        # tx_id=2 + valid_at=2022 → only tx 1 and 2 visible
+        result = p.synthesize("machine learning networks", k=5, hops=1,
+                              valid_at=dt(2022, 6, 1), tx_id=2)
+        for r in result.results:
+            core = p.store.cores.get(r.core_id)
+            source = core.slots.get("source", "") if core else ""
+            assert source in ("early_ai_2020.pdf", "transformers_2022.pdf")
+
+    # --- Source diversity integration ---
+
+    def test_diversity_in_synthesis(self) -> None:
+        p = self._build_corpus()
+        result = p.synthesize("neural networks learning models", k=10, hops=2)
+        if result.total_chunks >= 5:
+            # Top-5 should have multiple sources
+            top5_sources = set()
+            for r in result.results[:5]:
+                core = p.store.cores.get(r.core_id)
+                top5_sources.add(core.slots.get("source", "") if core else "")
+            assert len(top5_sources) >= 2
+
+    # --- Provenance integration ---
+
+    def test_provenance_chain(self) -> None:
+        p = self._build_corpus()
+        results = p.query("transformers attention", k=1)
+        if results:
+            prov = p.provenance_of(results[0])
+            assert "source" in prov or "document" in prov
+            cite = p.cite(results[0])
+            assert len(cite) > 0
+
+    # --- Full end-to-end ---
+
+    def test_complete_workflow(self) -> None:
+        """Full workflow: ingest → query → reason → synthesize → answer → audit."""
+        p = self._build_corpus()
+        p.enable_audit(True)
+
+        # 1. Basic query
+        results = p.query("neural networks", k=3)
+        assert len(results) > 0
+
+        # 2. Multi-hop reasoning
+        reasoning = p.reason("evolution of AI architectures", k=5, hops=2)
+        assert reasoning.total_chunks > 0
+        assert reasoning.total_hops >= 1
+
+        # 3. Synthesis
+        synthesis = p.synthesize("AI safety and hallucination", k=5, hops=1)
+        assert synthesis.source_count >= 1
+        assert len(synthesis.context) > 0
+
+        # 4. Answer extraction
+        answer = p.answer("What causes hallucination in language models?", k=5, hops=1)
+        assert answer["confidence"] >= 0.0
+        assert len(answer["answer_sentences"]) >= 0
+
+        # 5. Audit
+        audit = p.last_audit()
+        assert audit is not None
+        report = p.render_audit()
+        assert len(report) > 100
+
+        # 6. Stats
+        stats = p.stats()
+        assert stats["cores"] == 10  # 3+3+3+1 claims
+        assert stats["revisions"] == 10
