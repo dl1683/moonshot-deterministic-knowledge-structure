@@ -344,13 +344,8 @@ class Explorer:
                 )
                 retracted += 1
 
-        # Remove from graph
-        for rid in members:
-            self._graph._adjacency.pop(rid, None)
-        clusters.pop(cluster_id, None)
-        rev_cluster = getattr(self._graph, '_revision_cluster', {})
-        for rid in members:
-            rev_cluster.pop(rid, None)
+        # Remove from graph via public API
+        self._graph.remove_cluster(cluster_id)
 
         return {
             "retracted_count": retracted,

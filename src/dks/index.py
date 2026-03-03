@@ -562,6 +562,34 @@ class KnowledgeGraph:
             })
         return result
 
+    def remove_revision(self, revision_id: str) -> None:
+        """Remove a revision from the graph (adjacency + cluster membership)."""
+        self._adjacency.pop(revision_id, None)
+        # Remove from neighbor lists
+        for rid, adj in list(self._adjacency.items()):
+            self._adjacency[rid] = [(n, s) for n, s in adj if n != revision_id]
+        # Remove from cluster
+        cid = self._revision_cluster.pop(revision_id, None)
+        if cid is not None and cid in self._clusters:
+            members = self._clusters[cid]
+            if revision_id in members:
+                members.remove(revision_id)
+            if not members:
+                self._clusters.pop(cid, None)
+                self._cluster_labels.pop(cid, None)
+
+    def remove_cluster(self, cluster_id: int) -> list[str]:
+        """Remove an entire cluster and return the member revision_ids."""
+        members = self._clusters.pop(cluster_id, [])
+        self._cluster_labels.pop(cluster_id, None)
+        for rid in members:
+            self._adjacency.pop(rid, None)
+            self._revision_cluster.pop(rid, None)
+        # Remove from neighbor lists of other nodes
+        for rid, adj in list(self._adjacency.items()):
+            self._adjacency[rid] = [(n, s) for n, s in adj if n not in members]
+        return members
+
     def path_between(
         self,
         start_revision_id: str,
