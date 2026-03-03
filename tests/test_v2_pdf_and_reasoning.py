@@ -15,7 +15,7 @@ from dks import (
     ValidTime,
     TransactionTime,
 )
-from dks.pipeline import ReasoningResult, CoverageReport
+from dks.results import ReasoningResult, CoverageReport
 
 
 def dt(year: int, month: int = 1, day: int = 1) -> datetime:
@@ -577,7 +577,7 @@ class TestEvidenceChain:
         return pipeline
 
     def test_evidence_chain_returns_result(self) -> None:
-        from dks.pipeline import EvidenceChain
+        from dks.results import EvidenceChain
         pipeline = self._make_pipeline_with_graph()
         chain = pipeline.evidence_chain("neural networks learn patterns")
         assert isinstance(chain, EvidenceChain)
@@ -769,7 +769,7 @@ class TestAdaptiveRetrieval:
 
     def test_ask_returns_synthesis(self) -> None:
         from dks import ClaimCore, Provenance
-        from dks.pipeline import SynthesisResult
+        from dks.results import SynthesisResult
         store = KnowledgeStore()
         search = TfidfSearchIndex(store)
         pipeline = Pipeline(store=store, search_index=search)
@@ -870,7 +870,7 @@ class TestSynthesis:
         return pipeline
 
     def test_synthesize_returns_result(self) -> None:
-        from dks.pipeline import SynthesisResult
+        from dks.results import SynthesisResult
         pipeline = self._make_pipeline()
         result = pipeline.synthesize("neural networks", k=3, hops=1, context_window=0)
         assert isinstance(result, SynthesisResult)
@@ -1612,7 +1612,7 @@ class TestAuditTrail:
 
     def _make_pipeline(self) -> Pipeline:
         from dks import Provenance, ClaimCore
-        from dks.pipeline import AuditTrace
+        from dks.audit import AuditTrace
 
         store = KnowledgeStore()
         search = TfidfSearchIndex(store)

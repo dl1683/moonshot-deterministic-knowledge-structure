@@ -7,6 +7,8 @@ build/
 .eggs/
 *.egg
 .pytest_cache/
+.hypothesis/
+dks_state/
 .mypy_cache/
 .ruff_cache/
 *.npz
