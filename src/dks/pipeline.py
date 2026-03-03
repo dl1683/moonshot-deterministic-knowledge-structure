@@ -527,7 +527,7 @@ class Pipeline:
                 expanded.append(SearchResult(
                     core_id=rev.core_id,
                     revision_id=rid,
-                    score=result.score if rid == result.revision_id else 0.0,
+                    score=result.score if rid == result.revision_id else result.score * 0.5,
                     text=rev.assertion,
                 ))
 
@@ -1441,23 +1441,53 @@ class Pipeline:
         # Step 1: Multi-hop retrieval
         reasoning = self.reason(question, k=k, hops=hops, valid_at=valid_at, tx_id=tx_id)
 
-        # Step 2: Expand context for top results
-        seen: set[str] = set()
-        expanded_results: list[SearchResult] = []
+        # Step 1b: Diversify seed results for cross-source coverage
+        diversified = self._diversify_results(reasoning.results, max_per_source=3)
 
-        for r in reasoning.results:
+        # Step 2: Expand context for each seed, grouped by source
+        seed_groups: dict[str, list[SearchResult]] = {}  # source -> expanded chunks
+        seen: set[str] = set()
+
+        for r in diversified:
             if r.revision_id in seen:
                 continue
+
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
 
             if context_window > 0:
                 context = self.expand_context(r, window=context_window)
                 for cr in context:
                     if cr.revision_id not in seen:
                         seen.add(cr.revision_id)
-                        expanded_results.append(cr)
+                        seed_groups.setdefault(source, []).append(cr)
             else:
                 seen.add(r.revision_id)
-                expanded_results.append(r)
+                seed_groups.setdefault(source, []).append(r)
+
+        # Step 2b: Interleave sources for diversity in final result order
+        # Round-robin across sources, sorted by best seed score
+        for source in seed_groups:
+            seed_groups[source].sort(key=lambda r: -r.score)
+
+        sorted_group_keys = sorted(
+            seed_groups.keys(),
+            key=lambda s: -seed_groups[s][0].score if seed_groups[s] else 0,
+        )
+
+        expanded_results: list[SearchResult] = []
+        round_idx = 0
+        max_per_source = max(3, context_window * 2 + 1)  # seed + neighbors
+        while True:
+            added = False
+            for source in sorted_group_keys:
+                group = seed_groups[source]
+                if round_idx < len(group) and round_idx < max_per_source:
+                    expanded_results.append(group[round_idx])
+                    added = True
+            round_idx += 1
+            if not added:
+                break
 
         # Step 3: Group by source document
         by_source: dict[str, list[SearchResult]] = {}
@@ -1466,10 +1496,14 @@ class Pipeline:
             source = core.slots.get("source", "unknown") if core else "unknown"
             by_source.setdefault(source, []).append(r)
 
-        # Sort sources by relevance (sum of seed scores)
+        # Sort chunks within each source by score (seeds before neighbors)
+        for source in by_source:
+            by_source[source].sort(key=lambda r: -r.score)
+
+        # Sort sources by relevance (max seed score, not sum — avoids bulk-context bias)
         source_scores: dict[str, float] = {}
         for source, chunks in by_source.items():
-            source_scores[source] = sum(r.score for r in chunks)
+            source_scores[source] = max(r.score for r in chunks) if chunks else 0.0
         sorted_sources = sorted(by_source.keys(), key=lambda s: -source_scores[s])
 
         # Step 4: Build structured context
@@ -1607,9 +1641,13 @@ class Pipeline:
 
         # Exploratory: open-ended questions (check before short-query fallback)
         exploratory_patterns = [
-            r'^why\b', r'^how\s+(?:do|does|can|could|should)\b',
+            r'^why\b', r'^how\s+(?:do|does|can|could|should|have|has|did)\b',
             r'^explain\b', r'\bimpact\b', r'\bimplication',
             r'\bfuture\b', r'\btrend',
+            r'^which\b.*\bmost\b', r'^what\b.*\bmost\b',  # superlative questions
+            r'\bevolved?\b', r'\bchanged?\b', r'\bsuperseded\b',
+            r'\blimitation', r'\bfundamental\b', r'\bpromising\b',
+            r'\bconflict', r'\bcontradic',
         ]
         for pat in exploratory_patterns:
             if re.search(pat, q):
@@ -2650,7 +2688,7 @@ class Pipeline:
         import re
         from collections import Counter
 
-        # Common English stop words
+        # Common English stop words + newsletter/boilerplate terms
         stop_words = {
             "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
             "have", "has", "had", "do", "does", "did", "will", "would", "could",
@@ -2670,6 +2708,26 @@ class Pipeline:
             "know", "take", "come", "see", "think", "look", "want", "give",
             "use", "find", "tell", "work", "way", "let", "still", "going",
             "don", "didn", "doesn", "won", "ll", "ve", "re", "things",
+            # Newsletter/boilerplate terms
+            "hey", "subscribe", "newsletter", "email", "post", "writeup",
+            "write", "series", "breakdowns", "breakdown", "found", "value",
+            "sharing", "share", "appreciate", "link", "links", "click",
+            "follow", "join", "sign", "free", "update", "content", "read",
+            "reading", "check", "drop", "playlist", "search", "important",
+            "always", "people", "time", "really", "great", "amazing",
+            "incredible", "interesting", "awesome", "love", "thanks",
+            # Generic filler words
+            "huge", "believe", "becoming", "become", "thing", "things",
+            "look", "looking", "lot", "lots", "make", "making", "made",
+            "like", "keep", "still", "well", "much", "many", "also",
+            "way", "ways", "new", "use", "using", "used", "need",
+            "want", "say", "said", "means", "mean", "take", "step",
+            "move", "going", "come", "think", "know", "see", "get",
+            "let", "put", "run", "try", "give", "work", "call",
+            "long", "able", "different", "good", "best", "even",
+            "every", "first", "last", "next", "part", "point",
+            "right", "actually", "basically", "simply", "just",
+            "world", "today", "google", "source", "image",
         }
 
         # Extract words (2+ chars, alphabetic)
@@ -2698,6 +2756,57 @@ class Pipeline:
                 terms.append(term)
 
         return terms[:max_terms]
+
+    def _diversify_results(
+        self,
+        results: list[SearchResult],
+        *,
+        max_per_source: int = 3,
+    ) -> list[SearchResult]:
+        """Re-order results to maximize source diversity.
+
+        Uses a round-robin approach: take the best result from each source,
+        then the second-best from each, etc. This ensures the top results
+        come from diverse documents.
+
+        Args:
+            results: Results sorted by score.
+            max_per_source: Maximum results from any single source.
+
+        Returns:
+            Results re-ordered for diversity.
+        """
+        # Group by source, preserving order within each source
+        by_source: dict[str, list[SearchResult]] = {}
+        for r in results:
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            by_source.setdefault(source, []).append(r)
+
+        # Round-robin selection: best from each source, then second-best, etc.
+        diversified: list[SearchResult] = []
+        seen: set[str] = set()
+        round_num = 0
+
+        while len(diversified) < len(results):
+            added_this_round = False
+            # Sort sources by their best remaining score
+            sorted_sources = sorted(
+                by_source.items(),
+                key=lambda x: -x[1][0].score if x[1] else 0,
+            )
+            for source, chunks in sorted_sources:
+                if round_num < len(chunks) and round_num < max_per_source:
+                    r = chunks[round_num]
+                    if r.revision_id not in seen:
+                        seen.add(r.revision_id)
+                        diversified.append(r)
+                        added_this_round = True
+            round_num += 1
+            if not added_this_round:
+                break
+
+        return diversified
 
     def _rerank_for_question(
         self,
