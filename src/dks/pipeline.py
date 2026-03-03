@@ -1645,6 +1645,284 @@ class Pipeline:
                     decisions[entity] = decision
         return decisions
 
+    # ---- Source Management ----
+
+    def source_detail(self, source: str) -> dict[str, Any]:
+        """Get detailed statistics for a specific source document.
+
+        Args:
+            source: The source identifier (e.g. filename).
+
+        Returns:
+            Dict with chunk_count, clusters (with sizes), entities found,
+            page_range, avg_chunk_length, and quality_flags.
+        """
+        chunks: list[dict[str, Any]] = []
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            if core.slots.get("source") != source:
+                continue
+            chunks.append({
+                "revision_id": rid,
+                "core_id": rev.core_id,
+                "text": rev.assertion,
+                "page": core.slots.get("page_start"),
+                "confidence_bp": rev.confidence_bp,
+            })
+
+        if not chunks:
+            return {"source": source, "chunk_count": 0, "found": False}
+
+        # Cluster distribution
+        cluster_dist: dict[int, int] = {}
+        rev_cluster = {}
+        if hasattr(self, "_graph") and self._graph is not None:
+            rev_cluster = getattr(self._graph, '_revision_cluster', {})
+        for c in chunks:
+            cid = rev_cluster.get(c["revision_id"])
+            if cid is not None:
+                cluster_dist[cid] = cluster_dist.get(cid, 0) + 1
+
+        # Text stats
+        lengths = [len(c["text"]) for c in chunks]
+        avg_len = sum(lengths) / len(lengths) if lengths else 0
+        pages = sorted({c["page"] for c in chunks if c["page"] is not None})
+
+        # Quality flags
+        quality_flags: list[str] = []
+        short_chunks = sum(1 for l in lengths if l < 100)
+        if short_chunks > len(chunks) * 0.3:
+            quality_flags.append("many_short_chunks")
+        if len(cluster_dist) == 1:
+            quality_flags.append("single_cluster")
+
+        return {
+            "source": source,
+            "found": True,
+            "chunk_count": len(chunks),
+            "cluster_distribution": cluster_dist,
+            "page_range": f"{min(pages)}-{max(pages)}" if pages else None,
+            "total_pages": len(pages),
+            "avg_chunk_length": round(avg_len),
+            "shortest_chunk": min(lengths) if lengths else 0,
+            "longest_chunk": max(lengths) if lengths else 0,
+            "quality_flags": quality_flags,
+        }
+
+    def delete_source(
+        self,
+        source: str,
+        *,
+        reason: str = "User deleted source via interactive review",
+    ) -> dict[str, Any]:
+        """Delete all chunks from a source by retracting their revisions.
+
+        Soft delete — data remains as retracted revisions for audit trail.
+
+        Args:
+            source: The source identifier to delete.
+            reason: Reason for deletion.
+
+        Returns:
+            Dict with retracted_count.
+        """
+        from .core import Provenance as _P
+
+        tx_time = self._next_tx()
+        retracted = 0
+
+        for rid, rev in list(self.store.revisions.items()):
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            if core.slots.get("source") != source:
+                continue
+
+            self.store.assert_revision(
+                core=core,
+                assertion=rev.assertion,
+                valid_time=rev.valid_time,
+                transaction_time=tx_time,
+                provenance=_P(source="source_delete", evidence_ref=reason),
+                confidence_bp=rev.confidence_bp,
+                status="retracted",
+            )
+            retracted += 1
+
+        return {
+            "source": source,
+            "retracted_count": retracted,
+            "reason": reason,
+        }
+
+    # ---- Chunk Browsing ----
+
+    def browse_cluster(
+        self,
+        cluster_id: int,
+        *,
+        limit: int = 20,
+        preview_length: int = 200,
+    ) -> dict[str, Any]:
+        """Browse chunks within a specific cluster.
+
+        Args:
+            cluster_id: The cluster to browse.
+            limit: Max chunks to return.
+            preview_length: Text preview truncation length.
+
+        Returns:
+            Dict with cluster_id, chunk_count, and list of chunk previews.
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        clusters = getattr(self._graph, '_clusters', {})
+        members = clusters.get(cluster_id, [])
+
+        chunks: list[dict[str, Any]] = []
+        for rid in members[:limit]:
+            rev = self.store.revisions.get(rid)
+            if rev is None:
+                continue
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", "?") if core else "?"
+            text = rev.assertion
+            chunks.append({
+                "revision_id": rid,
+                "source": source,
+                "preview": text[:preview_length] + ("..." if len(text) > preview_length else ""),
+                "length": len(text),
+                "status": rev.status,
+            })
+
+        return {
+            "cluster_id": cluster_id,
+            "total_members": len(members),
+            "showing": len(chunks),
+            "chunks": chunks,
+        }
+
+    def browse_source(
+        self,
+        source: str,
+        *,
+        limit: int = 20,
+        preview_length: int = 200,
+    ) -> dict[str, Any]:
+        """Browse chunks from a specific source document.
+
+        Args:
+            source: The source identifier.
+            limit: Max chunks to return.
+            preview_length: Text preview truncation length.
+
+        Returns:
+            Dict with source, chunk_count, and list of chunk previews.
+        """
+        chunks: list[dict[str, Any]] = []
+        rev_cluster = {}
+        if hasattr(self, "_graph") and self._graph is not None:
+            rev_cluster = getattr(self._graph, '_revision_cluster', {})
+
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None or core.slots.get("source") != source:
+                continue
+
+            text = rev.assertion
+            page = core.slots.get("page_start")
+            chunks.append({
+                "revision_id": rid,
+                "page": page,
+                "cluster_id": rev_cluster.get(rid),
+                "preview": text[:preview_length] + ("..." if len(text) > preview_length else ""),
+                "length": len(text),
+            })
+
+            if len(chunks) >= limit:
+                break
+
+        total = sum(
+            1 for rid, rev in self.store.revisions.items()
+            if rev.status == "asserted"
+            and self.store.cores.get(rev.core_id)
+            and self.store.cores.get(rev.core_id).slots.get("source") == source
+        )
+
+        return {
+            "source": source,
+            "total_chunks": total,
+            "showing": len(chunks),
+            "chunks": chunks,
+        }
+
+    def chunk_detail(self, revision_id: str) -> dict[str, Any]:
+        """Get full details of a single chunk.
+
+        Args:
+            revision_id: The revision ID to inspect.
+
+        Returns:
+            Dict with full text, metadata, cluster info, and neighbors.
+        """
+        rev = self.store.revisions.get(revision_id)
+        if rev is None:
+            return {"revision_id": revision_id, "found": False}
+
+        core = self.store.cores.get(rev.core_id)
+        source = core.slots.get("source", "?") if core else "?"
+
+        # Cluster info
+        cluster_id = None
+        if hasattr(self, "_graph") and self._graph is not None:
+            rev_cluster = getattr(self._graph, '_revision_cluster', {})
+            cluster_id = rev_cluster.get(revision_id)
+
+        # Neighbors from graph
+        neighbor_previews: list[dict[str, Any]] = []
+        if hasattr(self, "_graph") and self._graph is not None:
+            adj = self._graph._adjacency.get(revision_id, {})
+            for nid, weight in sorted(adj.items(), key=lambda x: -x[1])[:5]:
+                n_rev = self.store.revisions.get(nid)
+                if n_rev is None:
+                    continue
+                n_core = self.store.cores.get(n_rev.core_id)
+                n_source = n_core.slots.get("source", "?") if n_core else "?"
+                neighbor_previews.append({
+                    "revision_id": nid,
+                    "source": n_source,
+                    "weight": round(weight, 4),
+                    "preview": n_rev.assertion[:150],
+                })
+
+        return {
+            "revision_id": revision_id,
+            "found": True,
+            "core_id": rev.core_id,
+            "source": source,
+            "text": rev.assertion,
+            "length": len(rev.assertion),
+            "status": rev.status,
+            "confidence_bp": rev.confidence_bp,
+            "cluster_id": cluster_id,
+            "page": core.slots.get("page_start") if core else None,
+            "slots": dict(core.slots) if core else {},
+            "neighbors": neighbor_previews,
+            "valid_time": {
+                "start": rev.valid_time.start.isoformat() if rev.valid_time.start else None,
+                "end": rev.valid_time.end.isoformat() if rev.valid_time.end else None,
+            },
+        }
+
     def link_entities(
         self,
         *,

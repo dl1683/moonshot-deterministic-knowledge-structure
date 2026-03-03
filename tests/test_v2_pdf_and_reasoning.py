@@ -2470,3 +2470,125 @@ class TestDataExploration:
 
         p.delete_cluster(target_cid)
         assert target_cid not in p._graph._clusters
+
+    # --- Source Management ---
+
+    def test_source_detail(self) -> None:
+        p = self._build_corpus()
+        detail = p.source_detail("paper_a.pdf")
+
+        assert detail["found"] is True
+        assert detail["chunk_count"] == 3
+        assert detail["avg_chunk_length"] > 0
+        assert isinstance(detail["cluster_distribution"], dict)
+        assert isinstance(detail["quality_flags"], list)
+
+    def test_source_detail_missing(self) -> None:
+        p = self._build_corpus()
+        detail = p.source_detail("nonexistent.pdf")
+        assert detail["found"] is False
+        assert detail["chunk_count"] == 0
+
+    def test_delete_source(self) -> None:
+        p = self._build_corpus()
+        result = p.delete_source("paper_a.pdf")
+        assert result["retracted_count"] == 3
+        assert result["source"] == "paper_a.pdf"
+
+        # Verify retraction revisions created
+        retracted = [
+            r for r in p.store.revisions.values()
+            if r.status == "retracted"
+        ]
+        assert len(retracted) == 3
+
+    def test_delete_source_nonexistent(self) -> None:
+        p = self._build_corpus()
+        result = p.delete_source("nonexistent.pdf")
+        assert result["retracted_count"] == 0
+
+    # --- Chunk Browsing ---
+
+    def test_browse_cluster(self) -> None:
+        p = self._build_corpus()
+        clusters = p._graph._clusters
+        cid = next(iter(clusters))
+
+        result = p.browse_cluster(cid)
+        assert result["cluster_id"] == cid
+        assert result["total_members"] > 0
+        assert len(result["chunks"]) > 0
+
+        chunk = result["chunks"][0]
+        assert "revision_id" in chunk
+        assert "source" in chunk
+        assert "preview" in chunk
+        assert "length" in chunk
+        assert "status" in chunk
+
+    def test_browse_cluster_with_limit(self) -> None:
+        p = self._build_corpus()
+        clusters = p._graph._clusters
+        cid = next(iter(clusters))
+
+        result = p.browse_cluster(cid, limit=1)
+        assert result["showing"] <= 1
+
+    def test_browse_cluster_without_graph(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        p = Pipeline(store=store, search_index=search)
+        with pytest.raises(ValueError, match="Graph not built"):
+            p.browse_cluster(0)
+
+    def test_browse_source(self) -> None:
+        p = self._build_corpus()
+        result = p.browse_source("paper_b.pdf")
+
+        assert result["source"] == "paper_b.pdf"
+        assert result["total_chunks"] == 3
+        assert len(result["chunks"]) == 3
+
+        chunk = result["chunks"][0]
+        assert "revision_id" in chunk
+        assert "preview" in chunk
+        assert "cluster_id" in chunk
+
+    def test_browse_source_empty(self) -> None:
+        p = self._build_corpus()
+        result = p.browse_source("nonexistent.pdf")
+        assert result["total_chunks"] == 0
+        assert len(result["chunks"]) == 0
+
+    def test_chunk_detail(self) -> None:
+        p = self._build_corpus()
+        # Get a revision ID
+        rid = next(iter(p.store.revisions))
+        detail = p.chunk_detail(rid)
+
+        assert detail["found"] is True
+        assert detail["revision_id"] == rid
+        assert len(detail["text"]) > 0
+        assert detail["source"] != "?"
+        assert "cluster_id" in detail
+        assert "neighbors" in detail
+        assert "valid_time" in detail
+        assert "slots" in detail
+
+    def test_chunk_detail_missing(self) -> None:
+        p = self._build_corpus()
+        detail = p.chunk_detail("nonexistent_id")
+        assert detail["found"] is False
+
+    def test_chunk_detail_neighbors(self) -> None:
+        p = self._build_corpus()
+        rid = next(iter(p.store.revisions))
+        detail = p.chunk_detail(rid)
+
+        # Should have some neighbors from graph
+        if detail["neighbors"]:
+            neighbor = detail["neighbors"][0]
+            assert "revision_id" in neighbor
+            assert "source" in neighbor
+            assert "weight" in neighbor
+            assert "preview" in neighbor
