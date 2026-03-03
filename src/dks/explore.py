@@ -56,11 +56,7 @@ class Explorer:
 
     def _retracted_cores(self) -> set[str]:
         """Return set of core_ids that have been retracted by a later revision."""
-        retracted: set[str] = set()
-        for rev in self.store.revisions.values():
-            if rev.status == "retracted":
-                retracted.add(rev.core_id)
-        return retracted
+        return self.store.retracted_core_ids()
 
     # ---- Data Exploration & Interactive Review ----
 
@@ -597,9 +593,12 @@ class Explorer:
             Dict with chunk_count, clusters (with sizes), entities found,
             page_range, avg_chunk_length, and quality_flags.
         """
+        retracted_cores = self._retracted_cores()
         chunks: list[dict[str, Any]] = []
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:
@@ -725,11 +724,14 @@ class Explorer:
 
         clusters = getattr(self._graph, '_clusters', {})
         members = clusters.get(cluster_id, [])
+        retracted_cores = self._retracted_cores()
 
         chunks: list[dict[str, Any]] = []
         for rid in members[:limit]:
             rev = self.store.revisions.get(rid)
             if rev is None:
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             source = core.slots.get("source", "?") if core else "?"
@@ -766,6 +768,7 @@ class Explorer:
         Returns:
             Dict with source, chunk_count, and list of chunk previews.
         """
+        retracted_cores = self._retracted_cores()
         chunks: list[dict[str, Any]] = []
         rev_cluster = {}
         if self._graph is not None:
@@ -773,6 +776,8 @@ class Explorer:
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None or core.slots.get("source") != source:
@@ -794,6 +799,7 @@ class Explorer:
         total = sum(
             1 for rid, rev in self.store.revisions.items()
             if rev.status == "asserted"
+            and rev.core_id not in retracted_cores
             and self.store.cores.get(rev.core_id)
             and self.store.cores.get(rev.core_id).slots.get("source") == source
         )
@@ -881,6 +887,7 @@ class Explorer:
         issues: list[dict[str, Any]] = []
         rev_cluster = getattr(self._graph, '_revision_cluster', {})
         clusters = getattr(self._graph, '_clusters', {})
+        retracted_cores = self._retracted_cores()
 
         # Collect per-source and per-chunk data
         source_chunks: dict[str, list[str]] = {}
@@ -889,6 +896,8 @@ class Explorer:
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:
@@ -1185,9 +1194,12 @@ class Explorer:
             List of dicts with tx_id, timestamp, source, chunk_count.
         """
         tx_groups: dict[int, dict[str, Any]] = {}
+        retracted_cores = self._retracted_cores()
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:
@@ -1255,11 +1267,14 @@ class Explorer:
 
         results: list[dict[str, Any]] = []
         seen_pairs: set[tuple[str, str]] = set()
+        retracted_cores = self._retracted_cores()
 
         # Get all asserted document chunks
         doc_revisions = []
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:
@@ -1419,12 +1434,15 @@ class Explorer:
             Dict with stale_count, by_source breakdown, and oldest chunks.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=age_days)
+        retracted_cores = self._retracted_cores()
 
         stale: list[dict[str, Any]] = []
         by_source: dict[str, int] = {}
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:
@@ -1565,11 +1583,14 @@ class Explorer:
             shared_topics, and comparison summary.
         """
         # Collect chunks per source
+        retracted_cores = self._retracted_cores()
         chunks_a: list[tuple[str, str]] = []  # (rid, text)
         chunks_b: list[tuple[str, str]] = []
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:

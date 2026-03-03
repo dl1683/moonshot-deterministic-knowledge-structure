@@ -401,8 +401,12 @@ class Pipeline:
         """
         result = self.store.merge(other.store)
         self.store = result.merged
+        # Update store references in all sub-modules
         if self._index is not None:
             self._index._store = self.store
+        self._ingester.store = self.store
+        self._search.store = self.store
+        self._explorer.store = self.store
         return result
 
     def rebuild_index(self) -> int:
@@ -416,11 +420,7 @@ class Pipeline:
         if self._index is None:
             raise ValueError("No search index configured.")
 
-        # Find cores that have been retracted
-        retracted_cores: set[str] = set()
-        for rev in self.store.revisions.values():
-            if rev.status == "retracted":
-                retracted_cores.add(rev.core_id)
+        retracted_cores = self.store.retracted_core_ids()
 
         items = []
         for revision_id, revision in self.store.revisions.items():
@@ -489,6 +489,9 @@ class Pipeline:
 
         if tfidf_component is None:
             raise ValueError("Graph building requires TfidfSearchIndex or HybridSearchIndex.")
+
+        # Rebuild index to ensure retracted content is excluded from graph
+        self.rebuild_index()
 
         self._graph = KnowledgeGraph()
         self._graph.build_from_tfidf(

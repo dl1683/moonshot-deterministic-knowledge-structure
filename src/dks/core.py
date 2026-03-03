@@ -2577,6 +2577,11 @@ class KnowledgeStore:
         self._revisions_by_core: Dict[str, set[str]] = {}
         self._merge_conflict_journal: tuple[tuple[int, MergeResult], ...] = ()
 
+    def retracted_core_ids(self) -> set[str]:
+        """Return the set of core_ids that have been retracted by a later revision."""
+        return {rev.core_id for rev in self.revisions.values()
+                if rev.status == "retracted"}
+
     def checkpoint(self) -> "KnowledgeStore":
         snapshot = KnowledgeStore()
         snapshot.cores = dict(self.cores)

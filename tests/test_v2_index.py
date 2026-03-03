@@ -153,9 +153,9 @@ class TestSearchIndex:
         index = SearchIndex(store, backend)
         index.add(rev1.revision_id, "Alpha is important")
 
-        # Without temporal filter — should find it
+        # Without temporal filter — retracted cores are excluded
         results = index.search("Alpha")
-        assert len(results) == 1
+        assert len(results) == 0
 
         # With temporal filter at tx=1 — should find it (before retraction)
         results = index.search("Alpha", valid_at=dt(2024, 6, 1), tx_id=1)

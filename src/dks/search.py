@@ -370,7 +370,14 @@ class SearchEngine:
         #   4. For bigrams, use PMI to keep only real collocations
         #   5. Per chunk, keep only the top-K most discriminative terms
 
-        n_chunks = len(self.store.revisions)
+        # Filter out retracted revisions once — used throughout this method
+        retracted = self.store.retracted_core_ids()
+        active_revisions = {
+            rid: rev for rid, rev in self.store.revisions.items()
+            if rev.status == "asserted" and rev.core_id not in retracted
+        }
+
+        n_chunks = len(active_revisions)
         if n_chunks == 0:
             return {"total_entities": 0, "total_links": 0, "top_entities": []}
 
@@ -388,7 +395,7 @@ class SearchEngine:
         sentence_sources: dict[str, set[str]] = {}  # sentence_hash -> source set
         chunk_boilerplate: dict[str, set[str]] = {}  # rev_id -> set of boilerplate hashes
 
-        for rev_id, rev in self.store.revisions.items():
+        for rev_id, rev in active_revisions.items():
             core = self.store.cores.get(rev.core_id)
             source = core.slots.get("source", rev_id) if core else rev_id
             # Split into sentences (simple split on . ! ? followed by space/newline)
@@ -407,7 +414,7 @@ class SearchEngine:
         n_sources = len({
             (self.store.cores.get(r.core_id).slots.get("source", rid)
              if self.store.cores.get(r.core_id) else rid)
-            for rid, r in self.store.revisions.items()
+            for rid, r in active_revisions.items()
         })
         boilerplate_threshold = max(3, int(n_sources * 0.05))
         boilerplate_hashes = {
@@ -417,7 +424,7 @@ class SearchEngine:
 
         # For each chunk, build clean text (boilerplate sentences removed)
         chunk_clean_text: dict[str, str] = {}
-        for rev_id, rev in self.store.revisions.items():
+        for rev_id, rev in active_revisions.items():
             sentences = re.split(r'(?<=[.!?])\s+|\n+', rev.assertion)
             clean_parts = []
             for sent in sentences:
@@ -444,7 +451,7 @@ class SearchEngine:
         unigram_tf_total: Counter = Counter()  # total corpus frequency
         acronym_df: Counter = Counter()   # ACRONYM -> num chunks containing it
 
-        for rev_id in self.store.revisions:
+        for rev_id in active_revisions:
             text = chunk_clean_text.get(rev_id, "")
             tokens = word_re.findall(text.lower())
             chunk_tokens[rev_id] = tokens
@@ -508,8 +515,8 @@ class SearchEngine:
         # For bigrams, also track source-document frequency
         # (a bigram only from one doc's boilerplate isn't a real entity)
         bigram_sources: dict[str, set[str]] = {}
-        for rev_id in self.store.revisions:
-            core = self.store.cores.get(self.store.revisions[rev_id].core_id)
+        for rev_id in active_revisions:
+            core = self.store.cores.get(active_revisions[rev_id].core_id)
             source = core.slots.get("source", rev_id) if core else rev_id
             tokens = chunk_tokens.get(rev_id, [])
             seen_bg: set[str] = set()
@@ -642,9 +649,10 @@ class SearchEngine:
         total_links = 0
 
         for rev_id, entities in chunk_entities.items():
-            core = self.store.cores.get(
-                self.store.revisions[rev_id].core_id
-            )
+            rev = active_revisions.get(rev_id)
+            if rev is None:
+                continue
+            core = self.store.cores.get(rev.core_id)
             source = core.slots.get("source", "") if core else ""
 
             # Find candidate neighbors via shared entities
@@ -654,9 +662,10 @@ class SearchEngine:
                     if other_id == rev_id:
                         continue
                     # Only cross-document links
-                    other_core = self.store.cores.get(
-                        self.store.revisions[other_id].core_id
-                    )
+                    other_rev = active_revisions.get(other_id)
+                    if other_rev is None:
+                        continue
+                    other_core = self.store.cores.get(other_rev.core_id)
                     other_source = other_core.slots.get("source", "") if other_core else ""
                     if other_source == source:
                         continue
@@ -1917,8 +1926,7 @@ class SearchEngine:
         """
         results: list[SearchResult] = []
         source_lower = source.lower()
-        retracted_cores = {r.core_id for r in self.store.revisions.values()
-                          if r.status == "retracted"}
+        retracted_cores = self.store.retracted_core_ids()
 
         for rid, rev in self.store.revisions.items():
             if len(results) >= k:

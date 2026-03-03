@@ -130,7 +130,9 @@ class SearchIndex:
         # Sort by score descending
         scored.sort(key=lambda x: (-x[0], x[1]))
 
-        # Filter by temporal visibility if requested
+        # Filter by retraction and temporal visibility
+        has_temporal = valid_at is not None and tx_id is not None
+        retracted = self._store.retracted_core_ids() if not has_temporal else set()
         results: list[SearchResult] = []
         for score, revision_id in scored:
             if len(results) >= k:
@@ -140,14 +142,18 @@ class SearchIndex:
             if revision is None:
                 continue
 
-            # Temporal filter: check if this revision is the winner at the query point
-            if valid_at is not None and tx_id is not None:
+            if has_temporal:
+                # Temporal filter: query_as_of handles retraction visibility
                 winner = self._store.query_as_of(
                     revision.core_id,
                     valid_at=valid_at,
                     tx_id=tx_id,
                 )
                 if winner is None or winner.revision_id != revision_id:
+                    continue
+            else:
+                # No temporal context: exclude retracted cores (latest view)
+                if revision.status != "asserted" or revision.core_id in retracted:
                     continue
 
             results.append(SearchResult(
@@ -346,8 +352,7 @@ class TfidfSearchIndex:
 
     def _retracted_cores(self) -> set[str]:
         """Return set of core_ids that have been retracted."""
-        return {rev.core_id for rev in self._store.revisions.values()
-                if rev.status == "retracted"}
+        return self._store.retracted_core_ids()
 
     def search(
         self,
@@ -363,7 +368,8 @@ class TfidfSearchIndex:
 
         # Get more candidates than needed to account for temporal filtering
         raw_results = self._tfidf.search(query, k=k * 3)
-        retracted = self._retracted_cores()
+        has_temporal = valid_at is not None and tx_id is not None
+        retracted = self._retracted_cores() if not has_temporal else set()
 
         results: list[SearchResult] = []
         for revision_id, score, text in raw_results:
@@ -374,17 +380,16 @@ class TfidfSearchIndex:
             if revision is None:
                 continue
 
-            # Filter retracted revisions (status or core retracted)
-            if revision.status != "asserted" or revision.core_id in retracted:
-                continue
-
-            if valid_at is not None and tx_id is not None:
+            if has_temporal:
                 winner = self._store.query_as_of(
                     revision.core_id,
                     valid_at=valid_at,
                     tx_id=tx_id,
                 )
                 if winner is None or winner.revision_id != revision_id:
+                    continue
+            else:
+                if revision.status != "asserted" or revision.core_id in retracted:
                     continue
 
             results.append(SearchResult(
@@ -805,8 +810,8 @@ class DenseSearchIndex:
             self._dense.rebuild()
 
         raw_results = self._dense.search(query, k=k * 3)
-        retracted = {rev.core_id for rev in self._store.revisions.values()
-                     if rev.status == "retracted"}
+        has_temporal = valid_at is not None and tx_id is not None
+        retracted = self._store.retracted_core_ids() if not has_temporal else set()
 
         results: list[SearchResult] = []
         for revision_id, score, text in raw_results:
@@ -817,16 +822,16 @@ class DenseSearchIndex:
             if revision is None:
                 continue
 
-            if revision.status != "asserted" or revision.core_id in retracted:
-                continue
-
-            if valid_at is not None and tx_id is not None:
+            if has_temporal:
                 winner = self._store.query_as_of(
                     revision.core_id,
                     valid_at=valid_at,
                     tx_id=tx_id,
                 )
                 if winner is None or winner.revision_id != revision_id:
+                    continue
+            else:
+                if revision.status != "asserted" or revision.core_id in retracted:
                     continue
 
             results.append(SearchResult(
@@ -935,8 +940,8 @@ class HybridSearchIndex:
             text_lookup.setdefault(rid, text)
 
         # Apply temporal filtering and build results
-        retracted = {rev.core_id for rev in self._store.revisions.values()
-                     if rev.status == "retracted"}
+        has_temporal = valid_at is not None and tx_id is not None
+        retracted = self._store.retracted_core_ids() if not has_temporal else set()
         results: list[SearchResult] = []
         for rid, score in rrf_scores:
             if len(results) >= k:
@@ -946,16 +951,16 @@ class HybridSearchIndex:
             if revision is None:
                 continue
 
-            if revision.status != "asserted" or revision.core_id in retracted:
-                continue
-
-            if valid_at is not None and tx_id is not None:
+            if has_temporal:
                 winner = self._store.query_as_of(
                     revision.core_id,
                     valid_at=valid_at,
                     tx_id=tx_id,
                 )
                 if winner is None or winner.revision_id != rid:
+                    continue
+            else:
+                if revision.status != "asserted" or revision.core_id in retracted:
                     continue
 
             results.append(SearchResult(
