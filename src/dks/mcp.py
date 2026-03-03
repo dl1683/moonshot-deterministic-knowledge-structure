@@ -97,6 +97,157 @@ class MCPToolHandler:
                     "properties": {},
                 },
             },
+            {
+                "name": "dks_reason",
+                "description": "Multi-hop reasoning query that expands search iteratively.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "Natural language question"},
+                        "k": {"type": "integer", "description": "Max results per hop", "default": 5},
+                        "hops": {"type": "integer", "description": "Number of expansion hops", "default": 2},
+                    },
+                    "required": ["question"],
+                },
+            },
+            {
+                "name": "dks_profile",
+                "description": "Get a comprehensive corpus profile with cluster overview, source stats, and quality flags.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "dks_quality_report",
+                "description": "Generate an automated quality report scanning for issues in the corpus.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "dks_sources",
+                "description": "List all source documents with chunk counts and page ranges.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "dks_source_detail",
+                "description": "Get detailed statistics for a specific source document.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "description": "Source name/filename"},
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "dks_browse_cluster",
+                "description": "Browse chunks within a specific topic cluster.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "cluster_id": {"type": "integer", "description": "Cluster ID to browse"},
+                        "limit": {"type": "integer", "description": "Max chunks to return", "default": 20},
+                    },
+                    "required": ["cluster_id"],
+                },
+            },
+            {
+                "name": "dks_browse_source",
+                "description": "Browse chunks from a specific source document.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "description": "Source name/filename"},
+                        "limit": {"type": "integer", "description": "Max chunks to return", "default": 20},
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "dks_chunk_detail",
+                "description": "Get full details of a specific chunk including text, metadata, and neighbors.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "revision_id": {"type": "string", "description": "The revision ID to inspect"},
+                    },
+                    "required": ["revision_id"],
+                },
+            },
+            {
+                "name": "dks_evolution",
+                "description": "Show how understanding of a topic has evolved across documents over time.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string", "description": "Topic to trace evolution for"},
+                        "k": {"type": "integer", "description": "Max chunks to retrieve", "default": 20},
+                    },
+                    "required": ["topic"],
+                },
+            },
+            {
+                "name": "dks_compare_sources",
+                "description": "Compare two source documents for overlap, divergence, and shared topics.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_a": {"type": "string", "description": "First source name"},
+                        "source_b": {"type": "string", "description": "Second source name"},
+                    },
+                    "required": ["source_a", "source_b"],
+                },
+            },
+            {
+                "name": "dks_contradictions",
+                "description": "Scan the corpus for potential contradictions between claims.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "k": {"type": "integer", "description": "Max contradiction pairs to find", "default": 10},
+                    },
+                },
+            },
+            {
+                "name": "dks_staleness",
+                "description": "Identify claims that may be outdated based on their age.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "age_days": {"type": "integer", "description": "Flag chunks older than this many days", "default": 365},
+                    },
+                },
+            },
+            {
+                "name": "dks_delete_source",
+                "description": "Soft-delete all chunks from a source (retract, preserving audit trail).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "description": "Source name to delete"},
+                        "reason": {"type": "string", "description": "Reason for deletion"},
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "dks_delete_cluster",
+                "description": "Soft-delete all chunks in a cluster (retract, preserving audit trail).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "cluster_id": {"type": "integer", "description": "Cluster ID to delete"},
+                        "reason": {"type": "string", "description": "Reason for deletion"},
+                    },
+                    "required": ["cluster_id"],
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -109,18 +260,31 @@ class MCPToolHandler:
         Returns:
             Tool result as a dict.
         """
-        if name == "dks_ingest":
-            return self._handle_ingest(arguments)
-        elif name == "dks_query":
-            return self._handle_query(arguments)
-        elif name == "dks_query_exact":
-            return self._handle_query_exact(arguments)
-        elif name == "dks_snapshot":
-            return self._handle_snapshot(arguments)
-        elif name == "dks_stats":
-            return self._handle_stats(arguments)
-        else:
+        handlers = {
+            "dks_ingest": self._handle_ingest,
+            "dks_query": self._handle_query,
+            "dks_query_exact": self._handle_query_exact,
+            "dks_snapshot": self._handle_snapshot,
+            "dks_stats": self._handle_stats,
+            "dks_reason": self._handle_reason,
+            "dks_profile": self._handle_profile,
+            "dks_quality_report": self._handle_quality_report,
+            "dks_sources": self._handle_sources,
+            "dks_source_detail": self._handle_source_detail,
+            "dks_browse_cluster": self._handle_browse_cluster,
+            "dks_browse_source": self._handle_browse_source,
+            "dks_chunk_detail": self._handle_chunk_detail,
+            "dks_evolution": self._handle_evolution,
+            "dks_compare_sources": self._handle_compare_sources,
+            "dks_contradictions": self._handle_contradictions,
+            "dks_staleness": self._handle_staleness,
+            "dks_delete_source": self._handle_delete_source,
+            "dks_delete_cluster": self._handle_delete_cluster,
+        }
+        handler = handlers.get(name)
+        if handler is None:
             return {"error": f"Unknown tool: {name}"}
+        return handler(arguments)
 
     def _handle_ingest(self, args: dict[str, Any]) -> dict[str, Any]:
         text = args.get("text", "")
@@ -218,6 +382,107 @@ class MCPToolHandler:
             "relations": len(store.relations),
             "pending_relations": len(store._pending_relations),
         }
+
+    def _handle_reason(self, args: dict[str, Any]) -> dict[str, Any]:
+        question = args.get("question", "")
+        if not question:
+            return {"error": "question is required"}
+        k = args.get("k", 5)
+        hops = args.get("hops", 2)
+        result = self._pipeline.reason(question, k=k, hops=hops, expand_k=3)
+        return {
+            "total_chunks": result.total_chunks,
+            "source_count": result.source_count,
+            "hops": result.total_hops,
+            "results": [
+                {"core_id": r.core_id, "revision_id": r.revision_id,
+                 "score": round(r.score, 4), "text": r.text[:500]}
+                for r in result.results[:10]
+            ],
+        }
+
+    def _handle_profile(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._pipeline.profile()
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_quality_report(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._pipeline.quality_report()
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_sources(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"sources": self._pipeline.list_sources()}
+
+    def _handle_source_detail(self, args: dict[str, Any]) -> dict[str, Any]:
+        source = args.get("source", "")
+        if not source:
+            return {"error": "source is required"}
+        return self._pipeline.source_detail(source)
+
+    def _handle_browse_cluster(self, args: dict[str, Any]) -> dict[str, Any]:
+        cluster_id = args.get("cluster_id")
+        if cluster_id is None:
+            return {"error": "cluster_id is required"}
+        limit = args.get("limit", 20)
+        try:
+            return self._pipeline.browse_cluster(int(cluster_id), limit=limit)
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_browse_source(self, args: dict[str, Any]) -> dict[str, Any]:
+        source = args.get("source", "")
+        if not source:
+            return {"error": "source is required"}
+        limit = args.get("limit", 20)
+        return self._pipeline.browse_source(source, limit=limit)
+
+    def _handle_chunk_detail(self, args: dict[str, Any]) -> dict[str, Any]:
+        revision_id = args.get("revision_id", "")
+        if not revision_id:
+            return {"error": "revision_id is required"}
+        return self._pipeline.chunk_detail(revision_id)
+
+    def _handle_evolution(self, args: dict[str, Any]) -> dict[str, Any]:
+        topic = args.get("topic", "")
+        if not topic:
+            return {"error": "topic is required"}
+        k = args.get("k", 20)
+        return self._pipeline.evolution(topic, k=k)
+
+    def _handle_compare_sources(self, args: dict[str, Any]) -> dict[str, Any]:
+        source_a = args.get("source_a", "")
+        source_b = args.get("source_b", "")
+        if not source_a or not source_b:
+            return {"error": "source_a and source_b are required"}
+        return self._pipeline.compare_sources(source_a, source_b)
+
+    def _handle_contradictions(self, args: dict[str, Any]) -> dict[str, Any]:
+        k = args.get("k", 10)
+        return {"contradictions": self._pipeline.scan_contradictions(k=k)}
+
+    def _handle_staleness(self, args: dict[str, Any]) -> dict[str, Any]:
+        age_days = args.get("age_days", 365)
+        return self._pipeline.staleness_report(age_days=age_days)
+
+    def _handle_delete_source(self, args: dict[str, Any]) -> dict[str, Any]:
+        source = args.get("source", "")
+        if not source:
+            return {"error": "source is required"}
+        reason = args.get("reason", "Deleted via MCP tool")
+        return self._pipeline.delete_source(source, reason=reason)
+
+    def _handle_delete_cluster(self, args: dict[str, Any]) -> dict[str, Any]:
+        cluster_id = args.get("cluster_id")
+        if cluster_id is None:
+            return {"error": "cluster_id is required"}
+        reason = args.get("reason", "Deleted via MCP tool")
+        try:
+            return self._pipeline.delete_cluster(int(cluster_id), reason=reason)
+        except ValueError as e:
+            return {"error": str(e)}
 
 
 def _parse_datetime(value: Any) -> datetime | None:

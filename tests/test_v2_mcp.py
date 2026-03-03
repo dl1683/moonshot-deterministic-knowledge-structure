@@ -39,7 +39,7 @@ class TestMCPToolListing:
     def test_list_tools_returns_tools(self) -> None:
         handler = _make_mcp_handler()
         tools = handler.list_tools()
-        assert len(tools) == 5
+        assert len(tools) == 19
 
         names = {t["name"] for t in tools}
         assert "dks_ingest" in names
@@ -47,6 +47,13 @@ class TestMCPToolListing:
         assert "dks_query_exact" in names
         assert "dks_snapshot" in names
         assert "dks_stats" in names
+        assert "dks_reason" in names
+        assert "dks_profile" in names
+        assert "dks_sources" in names
+        assert "dks_evolution" in names
+        assert "dks_compare_sources" in names
+        assert "dks_contradictions" in names
+        assert "dks_delete_source" in names
 
     def test_tools_have_schemas(self) -> None:
         handler = _make_mcp_handler()
