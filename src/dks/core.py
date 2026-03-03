@@ -9,6 +9,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import unicodedata
 import tempfile
 import time
 from typing import Any, Callable, Dict, Iterable, Literal, Mapping, Optional, TypeVar
@@ -30,7 +31,32 @@ _CANONICAL_JSON_FILE_REPLACE_MAX_ATTEMPTS = 8
 _CANONICAL_JSON_FILE_REPLACE_RETRY_BASE_DELAY_SECONDS = 0.005
 
 
+_ZERO_WIDTH_CODEPOINTS = frozenset(
+    "\u200b"  # zero-width space
+    "\u200c"  # zero-width non-joiner
+    "\u200d"  # zero-width joiner
+    "\u200e"  # left-to-right mark
+    "\u200f"  # right-to-left mark
+    "\u202a"  # left-to-right embedding
+    "\u202b"  # right-to-left embedding
+    "\u202c"  # pop directional formatting
+    "\u202d"  # left-to-right override
+    "\u202e"  # right-to-left override
+    "\u2060"  # word joiner
+    "\u2061"  # function application
+    "\u2062"  # invisible times
+    "\u2063"  # invisible separator
+    "\u2064"  # invisible plus
+    "\ufeff"  # byte order mark / zero-width no-break space
+    "\ufff9"  # interlinear annotation anchor
+    "\ufffa"  # interlinear annotation separator
+    "\ufffb"  # interlinear annotation terminator
+)
+
+
 def canonicalize_text(value: str) -> str:
+    value = unicodedata.normalize("NFC", value)
+    value = "".join(ch for ch in value if ch not in _ZERO_WIDTH_CODEPOINTS)
     return " ".join(value.strip().lower().split())
 
 
