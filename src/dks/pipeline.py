@@ -2233,6 +2233,377 @@ class Pipeline:
 
         return "\n".join(lines)
 
+    # ---- Temporal Analysis ----
+
+    def ingestion_timeline(self) -> list[dict[str, Any]]:
+        """Show when knowledge was added over time (ingestion timeline).
+
+        Returns a chronological list of ingestion events grouped by
+        transaction time, showing what was added and from which source.
+
+        Returns:
+            List of dicts with tx_id, timestamp, source, chunk_count.
+        """
+        tx_groups: dict[int, dict[str, Any]] = {}
+
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            ct = core.claim_type
+            if ct.startswith("dks."):
+                continue  # Skip internal claims
+
+            tx_id = rev.transaction_time.tx_id
+            if tx_id not in tx_groups:
+                tx_groups[tx_id] = {
+                    "tx_id": tx_id,
+                    "timestamp": rev.transaction_time.recorded_at,
+                    "sources": {},
+                    "chunk_count": 0,
+                }
+
+            source = core.slots.get("source", "unknown")
+            tx_groups[tx_id]["sources"][source] = (
+                tx_groups[tx_id]["sources"].get(source, 0) + 1
+            )
+            tx_groups[tx_id]["chunk_count"] += 1
+
+        result = []
+        for info in sorted(tx_groups.values(), key=lambda x: x["timestamp"]):
+            result.append({
+                "tx_id": info["tx_id"],
+                "timestamp": info["timestamp"].isoformat(),
+                "sources": dict(info["sources"]),
+                "chunk_count": info["chunk_count"],
+            })
+
+        return result
+
+    def scan_contradictions(self, *, k: int = 10, threshold: float = 0.6) -> list[dict[str, Any]]:
+        """Scan entire corpus for claims that potentially contradict each other.
+
+        Unlike contradictions(topic), this scans all chunks without a topic filter.
+        Uses search similarity to find related chunks, then checks for
+        negation patterns and opposing assertions. Works purely with
+        text heuristics (no LLM required).
+
+        Args:
+            k: Number of candidate pairs to evaluate.
+            threshold: Minimum similarity to consider as related.
+
+        Returns:
+            List of contradiction pairs with evidence.
+        """
+        # Negation signals that suggest contradiction
+        negation_markers = {
+            "not", "no", "never", "neither", "nor", "cannot", "can't",
+            "don't", "doesn't", "didn't", "won't", "wouldn't", "isn't",
+            "aren't", "wasn't", "weren't", "hardly", "rarely", "seldom",
+            "without", "lack", "fail", "false", "incorrect", "wrong",
+            "unlike", "contrary", "however", "but", "although", "despite",
+            "rather than", "instead of", "on the other hand",
+        }
+
+        contrast_phrases = {
+            "in contrast", "on the contrary", "conversely", "whereas",
+            "while others", "some argue", "critics", "challenged",
+            "disputed", "debated", "controversial", "disagree",
+        }
+
+        results: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+
+        # Get all asserted document chunks
+        doc_revisions = []
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            if core.claim_type.startswith("dks."):
+                continue
+            doc_revisions.append((rid, rev))
+
+        # For each chunk, search for related chunks from different sources
+        for rid, rev in doc_revisions:
+            if len(results) >= k:
+                break
+
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", "") if core else ""
+
+            # Search for similar content
+            search_results = self.query(rev.assertion[:200], k=5)
+
+            for sr in search_results:
+                if sr.revision_id == rid:
+                    continue
+                if sr.score < threshold:
+                    continue
+
+                # Get candidate
+                cand_rev = self.store.revisions.get(sr.revision_id)
+                if cand_rev is None:
+                    continue
+                cand_core = self.store.cores.get(cand_rev.core_id)
+                cand_source = cand_core.slots.get("source", "") if cand_core else ""
+
+                # Skip same-source pairs
+                if source == cand_source:
+                    continue
+
+                pair_key = tuple(sorted([rid, sr.revision_id]))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+
+                # Check for negation asymmetry
+                text_a = rev.assertion.lower()
+                text_b = cand_rev.assertion.lower()
+
+                neg_a = sum(1 for m in negation_markers if m in text_a)
+                neg_b = sum(1 for m in negation_markers if m in text_b)
+                negation_diff = abs(neg_a - neg_b)
+
+                contrast_a = sum(1 for p in contrast_phrases if p in text_a)
+                contrast_b = sum(1 for p in contrast_phrases if p in text_b)
+
+                # Score the contradiction likelihood
+                score = 0.0
+                evidence: list[str] = []
+
+                if negation_diff >= 2:
+                    score += 0.4
+                    evidence.append(f"Negation asymmetry ({neg_a} vs {neg_b})")
+                elif negation_diff == 1:
+                    score += 0.2
+                    evidence.append("Mild negation difference")
+
+                if contrast_a + contrast_b > 0:
+                    score += 0.3
+                    evidence.append("Contains contrast language")
+
+                # Different temporal context can indicate evolving understanding
+                if rev.valid_time.start and cand_rev.valid_time.start:
+                    time_gap = abs(
+                        (rev.valid_time.start - cand_rev.valid_time.start).days
+                    )
+                    if time_gap > 365:
+                        score += 0.1
+                        evidence.append(f"Published {time_gap // 365}+ years apart")
+
+                if score >= 0.2:
+                    results.append({
+                        "chunk_a": {
+                            "revision_id": rid,
+                            "source": source,
+                            "text": rev.assertion[:300],
+                        },
+                        "chunk_b": {
+                            "revision_id": sr.revision_id,
+                            "source": cand_source,
+                            "text": cand_rev.assertion[:300],
+                        },
+                        "similarity": round(sr.score, 4),
+                        "contradiction_score": round(score, 3),
+                        "evidence": evidence,
+                    })
+
+        # Sort by contradiction score
+        results.sort(key=lambda x: -x["contradiction_score"])
+        return results[:k]
+
+    def evolution(self, topic: str, *, k: int = 20) -> dict[str, Any]:
+        """Show how understanding of a topic has changed across documents.
+
+        Retrieves chunks related to the topic and organizes them by
+        temporal order, showing the progression of knowledge.
+
+        Args:
+            topic: The topic to trace evolution for.
+            k: Max chunks to retrieve.
+
+        Returns:
+            Dict with topic, timeline of chunks ordered by valid_time,
+            and source diversity info.
+        """
+        search_results = self.query(topic, k=k)
+
+        entries: list[dict[str, Any]] = []
+        sources_seen: set[str] = set()
+
+        for sr in search_results:
+            rev = self.store.revisions.get(sr.revision_id)
+            if rev is None or rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", "?") if core else "?"
+            sources_seen.add(source)
+
+            entries.append({
+                "revision_id": sr.revision_id,
+                "source": source,
+                "text": rev.assertion[:400],
+                "score": round(sr.score, 4),
+                "valid_start": rev.valid_time.start.isoformat() if rev.valid_time.start else None,
+                "ingested_at": rev.transaction_time.recorded_at.isoformat(),
+            })
+
+        # Sort by valid_time (earliest first)
+        entries.sort(
+            key=lambda x: x["valid_start"] or "9999"
+        )
+
+        return {
+            "topic": topic,
+            "total_chunks": len(entries),
+            "source_count": len(sources_seen),
+            "sources": sorted(sources_seen),
+            "timeline": entries,
+        }
+
+    def staleness_report(self, *, age_days: int = 365) -> dict[str, Any]:
+        """Identify old claims that may need updating.
+
+        Flags chunks whose valid_time start is older than the threshold,
+        grouped by source.
+
+        Args:
+            age_days: Chunks older than this are flagged as stale.
+
+        Returns:
+            Dict with stale_count, by_source breakdown, and oldest chunks.
+        """
+        from datetime import timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=age_days)
+
+        stale: list[dict[str, Any]] = []
+        by_source: dict[str, int] = {}
+
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            if core.claim_type.startswith("dks."):
+                continue
+
+            vt_start = rev.valid_time.start
+            if vt_start and vt_start.tzinfo is None:
+                from datetime import timezone as tz
+                vt_start = vt_start.replace(tzinfo=tz.utc)
+
+            if vt_start and vt_start < cutoff:
+                source = core.slots.get("source", "unknown")
+                by_source[source] = by_source.get(source, 0) + 1
+                stale.append({
+                    "revision_id": rid,
+                    "source": source,
+                    "valid_start": vt_start.isoformat(),
+                    "age_days": (datetime.now(timezone.utc) - vt_start).days,
+                    "preview": rev.assertion[:150],
+                })
+
+        # Sort by age (oldest first)
+        stale.sort(key=lambda x: -x["age_days"])
+
+        return {
+            "stale_count": len(stale),
+            "threshold_days": age_days,
+            "by_source": by_source,
+            "oldest": stale[:20],
+        }
+
+    def render_timeline(self, timeline: list[dict[str, Any]] | None = None) -> str:
+        """Render ingestion_timeline() output as human-readable text.
+
+        Args:
+            timeline: Output from ingestion_timeline(). If None, generates one.
+
+        Returns:
+            Formatted text string.
+        """
+        if timeline is None:
+            timeline = self.ingestion_timeline()
+
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append("  INGESTION TIMELINE")
+        lines.append("=" * 60)
+
+        for event in timeline:
+            ts = event["timestamp"][:19]  # Trim to seconds
+            sources = ", ".join(
+                f"{s} ({c})" for s, c in event["sources"].items()
+            )
+            lines.append(f"  [{ts}] TX-{event['tx_id']}: {event['chunk_count']} chunks")
+            lines.append(f"    Sources: {sources}")
+            lines.append("")
+
+        if not timeline:
+            lines.append("  No ingestion events recorded.")
+
+        return "\n".join(lines)
+
+    def render_evolution(self, result: dict[str, Any]) -> str:
+        """Render evolution() output as human-readable text.
+
+        Args:
+            result: Output from evolution().
+
+        Returns:
+            Formatted text string.
+        """
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append(f"  TOPIC EVOLUTION: {result['topic']}")
+        lines.append("=" * 60)
+        lines.append(f"  {result['total_chunks']} chunks across {result['source_count']} sources")
+        lines.append("")
+
+        for entry in result["timeline"]:
+            date = entry["valid_start"][:10] if entry["valid_start"] else "unknown"
+            lines.append(f"  [{date}] {entry['source'][:40]} (score: {entry['score']})")
+            lines.append(f"    {entry['text'][:150].replace(chr(10), ' ')}...")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def render_contradictions(self, pairs: list[dict[str, Any]]) -> str:
+        """Render contradictions() output as human-readable text.
+
+        Args:
+            pairs: Output from contradictions().
+
+        Returns:
+            Formatted text string.
+        """
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append("  POTENTIAL CONTRADICTIONS")
+        lines.append("=" * 60)
+
+        if not pairs:
+            lines.append("  No contradictions detected.")
+            return "\n".join(lines)
+
+        for i, pair in enumerate(pairs, 1):
+            lines.append(f"  #{i} (score: {pair['contradiction_score']}, similarity: {pair['similarity']})")
+            lines.append(f"    Evidence: {', '.join(pair['evidence'])}")
+            lines.append(f"    A [{pair['chunk_a']['source'][:30]}]:")
+            lines.append(f"      {pair['chunk_a']['text'][:150].replace(chr(10), ' ')}...")
+            lines.append(f"    B [{pair['chunk_b']['source'][:30]}]:")
+            lines.append(f"      {pair['chunk_b']['text'][:150].replace(chr(10), ' ')}...")
+            lines.append("")
+
+        return "\n".join(lines)
+
     def link_entities(
         self,
         *,

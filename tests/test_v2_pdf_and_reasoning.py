@@ -2675,3 +2675,127 @@ class TestDataExploration:
         detail = p.chunk_detail("nonexistent")
         text = p.render_chunk_detail(detail)
         assert "not found" in text
+
+    # --- Temporal Analysis ---
+
+    def test_timeline(self) -> None:
+        p = self._build_corpus()
+        tl = p.ingestion_timeline()
+
+        assert len(tl) > 0
+        for event in tl:
+            assert "tx_id" in event
+            assert "timestamp" in event
+            assert "sources" in event
+            assert "chunk_count" in event
+            assert event["chunk_count"] > 0
+
+    def test_timeline_ordering(self) -> None:
+        p = self._build_corpus()
+        tl = p.ingestion_timeline()
+
+        # Should be chronologically ordered
+        timestamps = [e["timestamp"] for e in tl]
+        assert timestamps == sorted(timestamps)
+
+    def test_contradictions(self) -> None:
+        p = self._build_corpus()
+        # Our test corpus has a deliberate contradiction:
+        # paper_c: "Current AI systems perform sophisticated pattern matching rather than true reasoning"
+        # paper_d: "Recent studies show large language models do exhibit genuine reasoning capabilities"
+        pairs = p.scan_contradictions(k=5, threshold=0.3)
+
+        # Should return valid structure even if no contradictions found
+        for pair in pairs:
+            assert "chunk_a" in pair
+            assert "chunk_b" in pair
+            assert "similarity" in pair
+            assert "contradiction_score" in pair
+            assert "evidence" in pair
+
+    def test_contradictions_different_sources(self) -> None:
+        p = self._build_corpus()
+        pairs = p.scan_contradictions(k=10, threshold=0.3)
+
+        # All pairs should be from different sources
+        for pair in pairs:
+            assert pair["chunk_a"]["source"] != pair["chunk_b"]["source"]
+
+    def test_evolution(self) -> None:
+        p = self._build_corpus()
+        result = p.evolution("neural networks", k=10)
+
+        assert result["topic"] == "neural networks"
+        assert result["total_chunks"] > 0
+        assert result["source_count"] > 0
+        assert len(result["sources"]) > 0
+        assert len(result["timeline"]) > 0
+
+        for entry in result["timeline"]:
+            assert "revision_id" in entry
+            assert "source" in entry
+            assert "text" in entry
+            assert "score" in entry
+
+    def test_evolution_timeline_ordering(self) -> None:
+        p = self._build_corpus()
+        result = p.evolution("reasoning", k=10)
+
+        # Timeline should be ordered by valid_start
+        starts = [e["valid_start"] for e in result["timeline"] if e["valid_start"]]
+        assert starts == sorted(starts)
+
+    def test_staleness_report(self) -> None:
+        p = self._build_corpus()
+        # Our corpus has dates from 2020, 2022, 2024 — some will be stale
+        report = p.staleness_report(age_days=365)
+
+        assert "stale_count" in report
+        assert "threshold_days" in report
+        assert "by_source" in report
+        assert "oldest" in report
+        assert report["threshold_days"] == 365
+
+        # paper_a.pdf (2020) should be stale
+        if report["stale_count"] > 0:
+            assert len(report["oldest"]) > 0
+            for entry in report["oldest"]:
+                assert "revision_id" in entry
+                assert "source" in entry
+                assert "age_days" in entry
+                assert entry["age_days"] > 365
+
+    def test_staleness_report_ordering(self) -> None:
+        p = self._build_corpus()
+        report = p.staleness_report(age_days=30)  # Most will be stale
+
+        if len(report["oldest"]) > 1:
+            ages = [e["age_days"] for e in report["oldest"]]
+            assert ages == sorted(ages, reverse=True)
+
+    def test_render_timeline(self) -> None:
+        p = self._build_corpus()
+        text = p.render_timeline()
+
+        assert "INGESTION TIMELINE" in text
+        assert "TX-" in text
+
+    def test_render_evolution(self) -> None:
+        p = self._build_corpus()
+        result = p.evolution("neural networks")
+        text = p.render_evolution(result)
+
+        assert "TOPIC EVOLUTION" in text
+        assert "neural networks" in text
+
+    def test_render_contradictions(self) -> None:
+        p = self._build_corpus()
+        pairs = p.scan_contradictions(k=5, threshold=0.3)
+        text = p.render_contradictions(pairs)
+
+        assert "POTENTIAL CONTRADICTIONS" in text
+
+    def test_render_contradictions_empty(self) -> None:
+        p = self._build_corpus()
+        text = p.render_contradictions([])
+        assert "No contradictions detected" in text
