@@ -1923,6 +1923,316 @@ class Pipeline:
             },
         }
 
+    # ---- Quality Report ----
+
+    def quality_report(self) -> dict[str, Any]:
+        """Generate a comprehensive corpus quality report with automated issue detection.
+
+        Scans the entire corpus for quality issues and returns a structured
+        report with actionable suggestions. No external dependencies required.
+
+        Returns:
+            Dict with sections: summary, issues (list), per_source stats,
+            and recommendations.
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        issues: list[dict[str, Any]] = []
+        rev_cluster = getattr(self._graph, '_revision_cluster', {})
+        clusters = getattr(self._graph, '_clusters', {})
+
+        # Collect per-source and per-chunk data
+        source_chunks: dict[str, list[str]] = {}
+        chunk_lengths: dict[str, int] = {}
+        orphan_chunks: list[str] = []
+
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None:
+                continue
+            ct = core.claim_type
+            if ct != "document.chunk@v1" and not ct.startswith("dks."):
+                continue
+            if ct.startswith("dks."):
+                continue  # Skip internal claims (entity reviews, etc.)
+
+            source = core.slots.get("source", "unknown")
+            source_chunks.setdefault(source, []).append(rid)
+            chunk_lengths[rid] = len(rev.assertion)
+
+            if rid not in rev_cluster:
+                orphan_chunks.append(rid)
+
+        total_chunks = len(chunk_lengths)
+        if total_chunks == 0:
+            return {
+                "summary": {"total_chunks": 0, "total_sources": 0, "issues": 0},
+                "issues": [],
+                "per_source": {},
+                "recommendations": [],
+            }
+
+        # Issue 1: Very short chunks (< 50 chars)
+        short_threshold = 50
+        short_chunks = [
+            rid for rid, l in chunk_lengths.items() if l < short_threshold
+        ]
+        if short_chunks:
+            issues.append({
+                "type": "short_chunks",
+                "severity": "warning",
+                "count": len(short_chunks),
+                "description": f"{len(short_chunks)} chunks under {short_threshold} characters",
+                "suggestion": "Review short chunks — they may be headers, footers, or incomplete extractions",
+                "examples": short_chunks[:5],
+            })
+
+        # Issue 2: Very long chunks (> 2000 chars)
+        long_threshold = 2000
+        long_chunks = [
+            rid for rid, l in chunk_lengths.items() if l > long_threshold
+        ]
+        if long_chunks:
+            issues.append({
+                "type": "long_chunks",
+                "severity": "info",
+                "count": len(long_chunks),
+                "description": f"{len(long_chunks)} chunks over {long_threshold} characters",
+                "suggestion": "Long chunks may reduce search precision — consider re-chunking",
+                "examples": long_chunks[:5],
+            })
+
+        # Issue 3: Orphan chunks (not assigned to any cluster)
+        if orphan_chunks:
+            issues.append({
+                "type": "orphan_chunks",
+                "severity": "info",
+                "count": len(orphan_chunks),
+                "description": f"{len(orphan_chunks)} chunks not assigned to any cluster",
+                "suggestion": "Rebuild graph or inspect orphan content",
+                "examples": orphan_chunks[:5],
+            })
+
+        # Issue 4: Single-source clusters
+        single_source_clusters: list[int] = []
+        for cid, members in clusters.items():
+            sources_in_cluster = set()
+            for rid in members:
+                core = self.store.cores.get(
+                    self.store.revisions[rid].core_id
+                ) if rid in self.store.revisions else None
+                if core:
+                    sources_in_cluster.add(core.slots.get("source", "?"))
+            if len(sources_in_cluster) == 1:
+                single_source_clusters.append(cid)
+
+        if single_source_clusters:
+            issues.append({
+                "type": "single_source_clusters",
+                "severity": "info",
+                "count": len(single_source_clusters),
+                "description": f"{len(single_source_clusters)}/{len(clusters)} clusters draw from only one source",
+                "suggestion": "Single-source clusters may indicate unique content or poor inter-document linking",
+                "cluster_ids": single_source_clusters,
+            })
+
+        # Issue 5: Source imbalance (one source has > 50% of chunks)
+        for source, rids in source_chunks.items():
+            fraction = len(rids) / total_chunks
+            if fraction > 0.5 and len(source_chunks) > 1:
+                issues.append({
+                    "type": "source_imbalance",
+                    "severity": "warning",
+                    "source": source,
+                    "fraction": round(fraction, 3),
+                    "description": f"'{source}' contains {fraction:.0%} of all chunks",
+                    "suggestion": "Dominant source may bias search results — consider balancing corpus",
+                })
+
+        # Issue 6: Low-confidence chunks
+        low_conf_threshold = 3000
+        low_conf = [
+            rid for rid in chunk_lengths
+            if self.store.revisions[rid].confidence_bp < low_conf_threshold
+        ]
+        if low_conf:
+            issues.append({
+                "type": "low_confidence",
+                "severity": "warning",
+                "count": len(low_conf),
+                "description": f"{len(low_conf)} chunks with confidence below {low_conf_threshold}bp",
+                "suggestion": "Review low-confidence chunks for extraction quality",
+                "examples": low_conf[:5],
+            })
+
+        # Per-source stats
+        per_source: dict[str, dict[str, Any]] = {}
+        for source, rids in source_chunks.items():
+            lengths = [chunk_lengths[r] for r in rids]
+            per_source[source] = {
+                "chunks": len(rids),
+                "avg_length": round(sum(lengths) / len(lengths)),
+                "min_length": min(lengths),
+                "max_length": max(lengths),
+                "clusters": len({rev_cluster.get(r) for r in rids if r in rev_cluster}),
+            }
+
+        # Generate recommendations
+        recommendations: list[str] = []
+        severity_counts = {"warning": 0, "info": 0}
+        for issue in issues:
+            severity_counts[issue["severity"]] = severity_counts.get(issue["severity"], 0) + 1
+
+        if severity_counts["warning"] == 0:
+            recommendations.append("Corpus quality looks good — no warnings detected")
+        if severity_counts["warning"] > 3:
+            recommendations.append("Multiple warnings — consider a cleanup pass before querying")
+        if len(source_chunks) == 1:
+            recommendations.append("Single-source corpus — consider adding more sources for richer cross-referencing")
+
+        return {
+            "summary": {
+                "total_chunks": total_chunks,
+                "total_sources": len(source_chunks),
+                "total_clusters": len(clusters),
+                "issues": len(issues),
+                "warnings": severity_counts.get("warning", 0),
+            },
+            "issues": issues,
+            "per_source": per_source,
+            "recommendations": recommendations,
+        }
+
+    def render_quality_report(self, report: dict[str, Any] | None = None) -> str:
+        """Render a quality report as human-readable text.
+
+        Args:
+            report: Output from quality_report(). If None, generates one.
+
+        Returns:
+            Formatted text string.
+        """
+        if report is None:
+            report = self.quality_report()
+
+        lines: list[str] = []
+        s = report["summary"]
+        lines.append("=" * 60)
+        lines.append("  CORPUS QUALITY REPORT")
+        lines.append("=" * 60)
+        lines.append(f"  Chunks: {s['total_chunks']}  |  Sources: {s['total_sources']}  |  Clusters: {s['total_clusters']}")
+        lines.append(f"  Issues: {s['issues']} ({s['warnings']} warnings)")
+        lines.append("")
+
+        if report["issues"]:
+            lines.append("  ISSUES:")
+            lines.append("-" * 60)
+            for issue in report["issues"]:
+                icon = "!!" if issue["severity"] == "warning" else ".."
+                lines.append(f"  [{icon}] {issue['description']}")
+                lines.append(f"       -> {issue['suggestion']}")
+                lines.append("")
+        else:
+            lines.append("  No issues detected.")
+            lines.append("")
+
+        if report["per_source"]:
+            lines.append("  PER-SOURCE STATS:")
+            lines.append("-" * 60)
+            for source, stats in sorted(
+                report["per_source"].items(), key=lambda x: -x[1]["chunks"]
+            ):
+                name = source[:45]
+                lines.append(
+                    f"  {name:<45s} {stats['chunks']:4d} chunks  "
+                    f"avg {stats['avg_length']:4d} chars  "
+                    f"{stats['clusters']} clusters"
+                )
+            lines.append("")
+
+        if report["recommendations"]:
+            lines.append("  RECOMMENDATIONS:")
+            lines.append("-" * 60)
+            for rec in report["recommendations"]:
+                lines.append(f"  - {rec}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def render_browse(self, result: dict[str, Any]) -> str:
+        """Render browse_cluster or browse_source result as human-readable text.
+
+        Args:
+            result: Output from browse_cluster() or browse_source().
+
+        Returns:
+            Formatted text string.
+        """
+        lines: list[str] = []
+
+        if "cluster_id" in result:
+            lines.append(f"  Cluster {result['cluster_id']}: {result['total_members']} chunks (showing {result['showing']})")
+        else:
+            lines.append(f"  Source: {result['source']} — {result['total_chunks']} chunks (showing {result['showing']})")
+
+        lines.append("-" * 60)
+
+        for i, chunk in enumerate(result.get("chunks", []), 1):
+            source = chunk.get("source", "")
+            page = chunk.get("page", "")
+            page_str = f" p.{page}" if page else ""
+            cluster = chunk.get("cluster_id")
+            cluster_str = f" [c{cluster}]" if cluster is not None else ""
+            lines.append(f"  {i}. {source}{page_str}{cluster_str} ({chunk['length']} chars)")
+            lines.append(f"     {chunk['preview']}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def render_chunk_detail(self, detail: dict[str, Any]) -> str:
+        """Render chunk_detail result as human-readable text.
+
+        Args:
+            detail: Output from chunk_detail().
+
+        Returns:
+            Formatted text string.
+        """
+        if not detail.get("found"):
+            return f"  Chunk {detail['revision_id']}: not found"
+
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append(f"  CHUNK DETAIL: {detail['revision_id'][:40]}")
+        lines.append("=" * 60)
+        lines.append(f"  Source:     {detail['source']}")
+        lines.append(f"  Status:    {detail['status']}")
+        lines.append(f"  Length:    {detail['length']} chars")
+        lines.append(f"  Cluster:   {detail.get('cluster_id', 'N/A')}")
+        lines.append(f"  Confidence: {detail['confidence_bp']}bp")
+
+        if detail.get("page"):
+            lines.append(f"  Page:      {detail['page']}")
+
+        lines.append("")
+        lines.append("  TEXT:")
+        lines.append("-" * 60)
+        lines.append(f"  {detail['text']}")
+        lines.append("")
+
+        if detail.get("neighbors"):
+            lines.append(f"  NEIGHBORS ({len(detail['neighbors'])}):")
+            lines.append("-" * 60)
+            for n in detail["neighbors"]:
+                lines.append(f"  [{n['weight']:.4f}] {n['source']}")
+                lines.append(f"    {n['preview'][:120]}...")
+                lines.append("")
+
+        return "\n".join(lines)
+
     def link_entities(
         self,
         *,

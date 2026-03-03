@@ -2592,3 +2592,86 @@ class TestDataExploration:
             assert "source" in neighbor
             assert "weight" in neighbor
             assert "preview" in neighbor
+
+    # --- Quality Report ---
+
+    def test_quality_report_structure(self) -> None:
+        p = self._build_corpus()
+        report = p.quality_report()
+
+        assert "summary" in report
+        assert "issues" in report
+        assert "per_source" in report
+        assert "recommendations" in report
+        assert report["summary"]["total_chunks"] == 10
+        assert report["summary"]["total_sources"] == 4
+
+    def test_quality_report_per_source(self) -> None:
+        p = self._build_corpus()
+        report = p.quality_report()
+
+        assert len(report["per_source"]) == 4
+        for source, stats in report["per_source"].items():
+            assert "chunks" in stats
+            assert "avg_length" in stats
+            assert "clusters" in stats
+
+    def test_quality_report_issues_are_valid(self) -> None:
+        p = self._build_corpus()
+        report = p.quality_report()
+
+        for issue in report["issues"]:
+            assert "type" in issue
+            assert "severity" in issue
+            assert "description" in issue
+            assert "suggestion" in issue
+            assert issue["severity"] in ("warning", "info")
+
+    def test_render_quality_report(self) -> None:
+        p = self._build_corpus()
+        text = p.render_quality_report()
+
+        assert "CORPUS QUALITY REPORT" in text
+        assert "Chunks:" in text
+        assert "Sources:" in text
+
+    def test_quality_report_without_graph(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        p = Pipeline(store=store, search_index=search)
+        with pytest.raises(ValueError, match="Graph not built"):
+            p.quality_report()
+
+    # --- Render Methods ---
+
+    def test_render_browse_cluster(self) -> None:
+        p = self._build_corpus()
+        cid = next(iter(p._graph._clusters))
+        result = p.browse_cluster(cid)
+        text = p.render_browse(result)
+
+        assert f"Cluster {cid}" in text
+        assert "chunks" in text
+
+    def test_render_browse_source(self) -> None:
+        p = self._build_corpus()
+        result = p.browse_source("paper_a.pdf")
+        text = p.render_browse(result)
+
+        assert "paper_a.pdf" in text
+
+    def test_render_chunk_detail(self) -> None:
+        p = self._build_corpus()
+        rid = next(iter(p.store.revisions))
+        detail = p.chunk_detail(rid)
+        text = p.render_chunk_detail(detail)
+
+        assert "CHUNK DETAIL" in text
+        assert "Source:" in text
+        assert "TEXT:" in text
+
+    def test_render_chunk_detail_missing(self) -> None:
+        p = self._build_corpus()
+        detail = p.chunk_detail("nonexistent")
+        text = p.render_chunk_detail(detail)
+        assert "not found" in text
