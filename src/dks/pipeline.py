@@ -1170,44 +1170,278 @@ class Pipeline:
         if not hasattr(self, "_graph") or self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
 
-        # Step 1: Extract entities from each chunk
-        # Use capitalized multi-word phrases as entity candidates
-        entity_pattern = re.compile(
-            r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b'
-            r'|'
-            r'\b([A-Z]{2,}(?:\s+[A-Z]{2,})*)\b'  # Acronyms
-        )
-        # Also extract technical terms (lowercased multi-word phrases)
-        tech_pattern = re.compile(
-            r'\b((?:neural|deep|machine|reinforcement|self|cross|multi|pre|fine)'
-            r'[\-\s]'
-            r'(?:network|learning|model|encoder|decoder|attention|training|tuning'
-            r'|supervised|transformer|embedding)s?)\b',
-            re.IGNORECASE,
-        )
+        # Step 1: Statistical entity extraction
+        #
+        # Principled approach — no stopword lists, no hardcoded patterns.
+        # The math decides what's noise vs. signal:
+        #
+        #   0. Detect boilerplate: sentences repeated across many documents
+        #      are template text (footers, headers, signatures) — exclude them
+        #   1. Tokenize each chunk into words (pure alphabetic only)
+        #   2. Extract candidate unigrams and bigrams
+        #   3. Compute IDF across all chunks — terms in too many or too few
+        #      chunks are automatically excluded
+        #   4. For bigrams, use PMI to keep only real collocations
+        #   5. Per chunk, keep only the top-K most discriminative terms
+        #
+        import math
+        from collections import Counter
 
-        chunk_entities: dict[str, set[str]] = {}  # revision_id -> entity set
-        entity_chunks: dict[str, set[str]] = {}   # entity -> revision_ids
+        n_chunks = len(self.store.revisions)
+        if n_chunks == 0:
+            return {"total_entities": 0, "total_links": 0, "top_entities": []}
+
+        # IDF band: only keep terms appearing in [min_df, max_df] fraction of chunks
+        # Scale gracefully: small corpus (< 50 chunks) uses min_df=2, large uses 3+
+        min_df = 2 if n_chunks < 50 else max(3, int(n_chunks * 0.004))
+        max_df_frac = 0.10 if n_chunks > 100 else 0.50  # More lenient for small corpora
+        max_df = max(min_df + 1, int(n_chunks * max_df_frac))
+
+        # Step 0: Boilerplate detection
+        # Sentences that appear in many different source documents are template
+        # text (newsletter footers, author bios, social links). We detect these
+        # by hashing normalized sentences and counting source-document frequency.
+        import hashlib
+
+        sentence_sources: dict[str, set[str]] = {}  # sentence_hash -> source set
+        chunk_boilerplate: dict[str, set[str]] = {}  # rev_id -> set of boilerplate hashes
 
         for rev_id, rev in self.store.revisions.items():
-            text = rev.assertion
-            entities: set[str] = set()
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", rev_id) if core else rev_id
+            # Split into sentences (simple split on . ! ? followed by space/newline)
+            sentences = re.split(r'(?<=[.!?])\s+|\n+', rev.assertion)
+            hashes = set()
+            for sent in sentences:
+                normed = re.sub(r'\s+', ' ', sent.lower().strip())
+                if len(normed) < 20:
+                    continue  # Too short to be meaningful boilerplate
+                h = hashlib.md5(normed.encode()).hexdigest()[:12]
+                hashes.add(h)
+                sentence_sources.setdefault(h, set()).add(source)
+            chunk_boilerplate[rev_id] = hashes
 
-            # Extract capitalized phrases (proper nouns, names)
-            for match in entity_pattern.finditer(text):
-                entity = (match.group(1) or match.group(2)).strip()
-                if len(entity) >= min_entity_length:
-                    entities.add(entity.lower())
+        # A sentence appearing in >5% of source documents is boilerplate
+        n_sources = len({
+            (self.store.cores.get(r.core_id).slots.get("source", rid)
+             if self.store.cores.get(r.core_id) else rid)
+            for rid, r in self.store.revisions.items()
+        })
+        boilerplate_threshold = max(3, int(n_sources * 0.05))
+        boilerplate_hashes = {
+            h for h, sources in sentence_sources.items()
+            if len(sources) >= boilerplate_threshold
+        }
 
-            # Extract technical terms
-            for match in tech_pattern.finditer(text):
-                entity = match.group(1).strip().lower()
-                if len(entity) >= min_entity_length:
-                    entities.add(entity)
+        # For each chunk, build clean text (boilerplate sentences removed)
+        chunk_clean_text: dict[str, str] = {}
+        for rev_id, rev in self.store.revisions.items():
+            sentences = re.split(r'(?<=[.!?])\s+|\n+', rev.assertion)
+            clean_parts = []
+            for sent in sentences:
+                normed = re.sub(r'\s+', ' ', sent.lower().strip())
+                if len(normed) < 20:
+                    clean_parts.append(sent)
+                    continue
+                h = hashlib.md5(normed.encode()).hexdigest()[:12]
+                if h not in boilerplate_hashes:
+                    clean_parts.append(sent)
+            chunk_clean_text[rev_id] = " ".join(clean_parts)
+
+        # Tokenize: pure alphabetic words (3+ chars) — excludes URLs,
+        # hashes, codes, mixed alphanumeric noise. Acronyms (2+ uppercase)
+        # are extracted separately and kept as-is.
+        word_re = re.compile(r'\b([a-z]{3,})\b')
+        acronym_re = re.compile(r'\b([A-Z]{2,})\b')
+
+        # Pass 1: Collect document frequencies for unigrams and bigrams
+        chunk_tokens: dict[str, list[str]] = {}  # rev_id -> token list
+        chunk_acronyms: dict[str, set[str]] = {}  # rev_id -> acronym set
+        unigram_df: Counter = Counter()   # term -> num chunks containing it
+        bigram_df: Counter = Counter()    # "w1 w2" -> num chunks containing it
+        unigram_tf_total: Counter = Counter()  # total corpus frequency
+        acronym_df: Counter = Counter()   # ACRONYM -> num chunks containing it
+
+        for rev_id in self.store.revisions:
+            text = chunk_clean_text.get(rev_id, "")
+            tokens = word_re.findall(text.lower())
+            chunk_tokens[rev_id] = tokens
+
+            # Extract acronyms separately (from clean text)
+            acrs = set(acronym_re.findall(text))
+            chunk_acronyms[rev_id] = acrs
+            for acr in acrs:
+                acronym_df[acr] += 1
+
+            # Unique terms in this chunk (for DF counting)
+            unique_unigrams = set(tokens)
+            for t in unique_unigrams:
+                unigram_df[t] += 1
+                unigram_tf_total[t] += tokens.count(t)
+
+            # Unique bigrams in this chunk
+            unique_bigrams = set()
+            for i in range(len(tokens) - 1):
+                bg = f"{tokens[i]} {tokens[i+1]}"
+                unique_bigrams.add(bg)
+            for bg in unique_bigrams:
+                bigram_df[bg] += 1
+
+        # Filter acronyms by IDF band (same as words)
+        good_acronyms: dict[str, float] = {}
+        for acr, df in acronym_df.items():
+            if df < min_df or df > max_df:
+                continue
+            if len(acr) < 2:
+                continue
+            good_acronyms[acr] = math.log(n_chunks / df)
+
+        # Identify function/ubiquitous words from the data: words appearing
+        # in >50% of chunks. These are grammar words and corpus boilerplate.
+        # Derived entirely from corpus statistics, no hardcoded lists.
+        function_threshold = max(n_chunks // 2, 5)
+        function_words = {
+            term for term, df in unigram_df.items()
+            if df > function_threshold
+        }
+
+        # Pass 2: Compute IDF scores, filter to informative band
+        # IDF = log(N / df) — higher = more discriminative
+        good_unigrams: dict[str, float] = {}
+        for term, df in unigram_df.items():
+            if df < min_df or df > max_df:
+                continue
+            if len(term) < min_entity_length:
+                continue
+            if term in function_words:
+                continue
+            good_unigrams[term] = math.log(n_chunks / df)
+
+        # For bigrams: require IDF band + positive PMI
+        # PMI(w1, w2) = log(P(w1,w2) / (P(w1) * P(w2)))
+        # Positive PMI means the words co-occur more than chance
+        total_tokens = sum(len(t) for t in chunk_tokens.values())
+        total_bigrams = max(total_tokens - n_chunks, 1)  # approximate
+
+        # For bigrams, also track source-document frequency
+        # (a bigram only from one doc's boilerplate isn't a real entity)
+        bigram_sources: dict[str, set[str]] = {}
+        for rev_id in self.store.revisions:
+            core = self.store.cores.get(self.store.revisions[rev_id].core_id)
+            source = core.slots.get("source", rev_id) if core else rev_id
+            tokens = chunk_tokens.get(rev_id, [])
+            seen_bg: set[str] = set()
+            for i in range(len(tokens) - 1):
+                bg = f"{tokens[i]} {tokens[i+1]}"
+                if bg not in seen_bg:
+                    seen_bg.add(bg)
+                    bigram_sources.setdefault(bg, set()).add(source)
+
+        good_bigrams: dict[str, float] = {}
+        for bigram, df in bigram_df.items():
+            if df < min_df or df > max_df:
+                continue
+            w1, w2 = bigram.split(" ", 1)
+            if len(w1) < 3 or len(w2) < 3:
+                continue
+            # Cross-source requirement: must appear in 2+ source docs
+            # (skip for tiny corpora with <=4 sources)
+            min_bg_sources = 2 if n_sources > 4 else 1
+            if len(bigram_sources.get(bigram, set())) < min_bg_sources:
+                continue
+            # Neither component can be a function word
+            if w1 in function_words or w2 in function_words:
+                continue
+            # PMI filter: keep only collocations
+            p_bigram = df / max(n_chunks, 1)
+            p_w1 = unigram_df.get(w1, 1) / max(n_chunks, 1)
+            p_w2 = unigram_df.get(w2, 1) / max(n_chunks, 1)
+            pmi = math.log(max(p_bigram, 1e-10) / max(p_w1 * p_w2, 1e-10))
+            if pmi <= 0.5:
+                continue  # Require meaningful collocation (PMI > 0.5)
+            # IDF of the bigram, weighted by source diversity
+            idf = math.log(n_chunks / df)
+            n_bg_sources = len(bigram_sources.get(bigram, set()))
+            # Source ratio: fraction of distinct sources vs chunks containing it
+            # High ratio = appears broadly across docs (technical term)
+            # Low ratio = concentrated in few docs (single-author boilerplate)
+            source_ratio = n_bg_sources / max(df, 1)
+            good_bigrams[bigram] = idf * (1 + pmi) * (1 + source_ratio)
+
+        # Pass 3: For each chunk, select top-K discriminative entities
+        max_entities_per_chunk = 15
+
+        chunk_entities: dict[str, set[str]] = {}
+        entity_chunks: dict[str, set[str]] = {}
+
+        for rev_id, tokens in chunk_tokens.items():
+            # Score candidates by TF-IDF
+            token_counts = Counter(tokens)
+            candidates: list[tuple[str, float]] = []
+
+            # Unigram candidates
+            for term, count in token_counts.items():
+                if term in good_unigrams:
+                    tf = 1 + math.log(count)  # Sublinear TF
+                    score = tf * good_unigrams[term]
+                    candidates.append((term, score))
+
+            # Bigram candidates
+            bigram_counts: Counter = Counter()
+            for i in range(len(tokens) - 1):
+                bg = f"{tokens[i]} {tokens[i+1]}"
+                bigram_counts[bg] += 1
+
+            for bg, count in bigram_counts.items():
+                if bg in good_bigrams:
+                    tf = 1 + math.log(count)
+                    score = tf * good_bigrams[bg]
+                    candidates.append((bg, score))
+
+            # Acronym candidates
+            for acr in chunk_acronyms.get(rev_id, set()):
+                if acr in good_acronyms:
+                    candidates.append((acr, good_acronyms[acr]))
+
+            # Take top-K by score
+            candidates.sort(key=lambda x: -x[1])
+            entities = set()
+            for term, _ in candidates[:max_entities_per_chunk]:
+                entities.add(term)
 
             chunk_entities[rev_id] = entities
             for entity in entities:
                 entity_chunks.setdefault(entity, set()).add(rev_id)
+
+        # Pass 4: Cluster-spread filter
+        # Remove entities that only appear within a single topical cluster.
+        # Boilerplate entities ("chocolate milk") appear in many chunks but
+        # always alongside the same newsletter content = same cluster.
+        # Real technical entities ("neural networks") span diverse topics.
+        rev_to_cluster = getattr(self._graph, '_revision_cluster', None)
+        if rev_to_cluster and len(rev_to_cluster) > 0 and n_chunks > 50:
+            # Only apply cluster filter on large enough corpora where
+            # clustering is meaningful. For small corpora (<50 chunks),
+            # the clusters are too coarse to be a useful filter.
+            n_actual_clusters = len(set(rev_to_cluster.values()))
+            min_clusters = 2 if n_actual_clusters >= 5 else 1
+            filtered_entity_chunks: dict[str, set[str]] = {}
+            for entity, rev_ids in entity_chunks.items():
+                clusters = set()
+                for rid in rev_ids:
+                    cid = rev_to_cluster.get(rid)
+                    if cid is not None:
+                        clusters.add(cid)
+                if len(clusters) >= min_clusters:
+                    filtered_entity_chunks[entity] = rev_ids
+            entity_chunks = filtered_entity_chunks
+
+            # Rebuild chunk_entities to only include surviving entities
+            for rev_id in chunk_entities:
+                chunk_entities[rev_id] = {
+                    e for e in chunk_entities[rev_id]
+                    if e in entity_chunks
+                }
 
         # Step 2: Find cross-document entity links
         # For each pair of chunks from different sources, count shared entities
