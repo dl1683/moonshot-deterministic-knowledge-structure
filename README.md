@@ -1,99 +1,151 @@
-# Deterministic Knowledge Structure (DKS)
+# DKS — Deterministic Knowledge Structure
 
-A deterministic, AI-native data structure for factual memory where paraphrases converge to the same semantic identity without collapsing near-neighbor facts.
+**The SQLite for agent memory.** A deterministic, bitemporal knowledge store for AI agents that need reliable, auditable, mergeable memory.
 
-## What This Is
+```
+pip install dks           # zero-dependency core
+pip install dks[pipeline] # + numpy for embedding search
+pip install dks[all]      # + LLM + MCP integration
+```
 
-DKS is a V1 implementation of a **Deterministic Semantic Fact Graph** — a bitemporal knowledge store with:
+## 5-Line Quick Start
 
-- **Canonicalized identity**: SHA-256 hashing of normalized text ensures "the CEO of Apple" and "Apple's CEO" converge to the same `core_id`
-- **Bitemporal revision model**: Separate `ValidTime` (when a fact was true) and `TransactionTime` (when it was recorded) for audit-safe historical queries
-- **Deterministic merge**: Replica-stable conflict resolution with explicit conflict records (competing revisions, ID collisions, epoch quarantine, orphan relations)
-- **Provenance tracking**: Evidence atoms with independence-aware confidence aggregation and cycle-safe inference fixpoints
-- **Snapshot persistence**: Full store state serializable to canonical JSON with round-trip validation and checkpoint/restart determinism
+```python
+from dks import Pipeline, RegexExtractor, NumpyIndex, ValidTime, TransactionTime
+from datetime import datetime, timezone
 
-## Install
+# Configure pipeline
+extractor = RegexExtractor()
+extractor.register_pattern("residence", r"(?P<subject>\w+) lives in (?P<city>\w+)", ["subject", "city"])
+pipeline = Pipeline(extractor=extractor, embedding_backend=NumpyIndex(dimension=64))
+
+# Ingest (non-deterministic extraction → deterministic storage)
+pipeline.ingest(
+    "Alice lives in London",
+    valid_time=ValidTime(start=datetime(2024, 1, 1, tzinfo=timezone.utc), end=None),
+    transaction_time=TransactionTime(tx_id=1, recorded_at=datetime.now(timezone.utc)),
+)
+
+# Query with temporal awareness
+results = pipeline.query("who lives where", k=5)
+```
+
+## What DKS Does
+
+DKS is a **complete agentic memory system** built on a deterministic core:
+
+| Layer | Module | Purpose |
+|-------|--------|---------|
+| **Extract** | `dks.extract` | Extract structured claims from text (regex or LLM) |
+| **Resolve** | `dks.resolve` | Map surface mentions to canonical entity IDs |
+| **Store** | `dks.core` | Deterministic bitemporal knowledge store |
+| **Search** | `dks.index` | Embedding-based semantic search with temporal filtering |
+| **Orchestrate** | `dks.pipeline` | Single canonical execution path |
+| **Integrate** | `dks.mcp` | MCP server for AI agent integration |
+
+### The Commitment Boundary
+
+```
+                NON-DETERMINISTIC              DETERMINISTIC
+              ┌──────────────────┐  ┌─────────────────────────────┐
+  text ──────►│  Extract claims  │  │                             │
+              │  Resolve entities│──►  store.assert_revision()   │
+              │  Embed for search│  │                             │
+              └──────────────────┘  │  SHA-256 identity           │
+                                    │  Bitemporal visibility      │
+                                    │  Deterministic merge        │
+                                    │  Conflict classification    │
+                                    └─────────────────────────────┘
+```
+
+**Determinism is a property of DATA, not CODE.** LLM extraction and embedding search are non-deterministic, but once committed to the store, everything becomes deterministic data with SHA-256 identity, bitemporal visibility, and CRDT-style merge.
+
+## Core Properties
+
+- **Canonicalized identity**: Unicode NFC normalization + zero-width stripping + SHA-256 hashing. Same semantic content = same `core_id`.
+- **Bitemporal model**: `ValidTime` (when a fact was true) + `TransactionTime` (when it was recorded). Query any point in both dimensions.
+- **Deterministic merge**: CRDT-style merge with proven commutativity, associativity, and idempotency. Conflict classification (competing revisions, ID collisions, orphan relations).
+- **Entity resolution as data**: Resolution decisions stored as regular claims — auditable, retractable, temporally queryable.
+- **Protocol-based backends**: Swap LLM extractors, embedding models, or resolution strategies without changing the pipeline.
+
+## Architecture
+
+```
+dks/
+  core.py      Deterministic store (~5,400 lines, zero deps)
+  extract.py   Extractor Protocol + RegexExtractor + LLMExtractor
+  resolve.py   Resolver Protocol + ExactResolver + NormalizedResolver + CascadingResolver
+  index.py     EmbeddingBackend Protocol + SearchIndex + NumpyIndex
+  pipeline.py  Pipeline orchestrator
+  mcp.py       MCP tool handler
+```
+
+**40 exported symbols** (26 V1 core + 14 V2 modules). All V1 symbols unchanged.
+
+## Entity Resolution as Data
+
+Resolution decisions are stored as regular claims:
+
+```python
+from dks import ExactResolver, ResolutionDecision
+
+resolver = ExactResolver()
+resolver.register("Tim Cook", "entity:tim_cook")
+
+decision = resolver.resolve("Tim Cook")
+# ResolutionDecision(surface_form='Tim Cook', resolved_entity_id='entity:tim_cook', confidence_bp=10000, method='exact')
+
+# Store the decision as an auditable claim
+alias_claim = decision.as_alias_claim()
+# ClaimCore(claim_type='dks.entity_alias@v1', slots={'surface': 'tim cook', 'entity': 'entity:tim_cook', 'method': 'exact'})
+```
+
+Wrong resolutions can be explicitly retracted. Resolution history is temporally queryable.
+
+## MCP Integration
+
+```python
+from dks import Pipeline, MCPToolHandler, RegexExtractor, NumpyIndex
+
+pipeline = Pipeline(extractor=RegexExtractor(), embedding_backend=NumpyIndex(64))
+handler = MCPToolHandler(pipeline)
+
+# Tools: dks_ingest, dks_query, dks_query_exact, dks_snapshot, dks_stats
+tools = handler.list_tools()
+result = handler.handle_tool_call("dks_ingest", {"text": "Alice lives in London"})
+```
+
+## Testing
 
 ```bash
 pip install -e ".[dev]"
-```
-
-## Test
-
-```bash
 python -m pytest -q
 ```
 
-475 tests covering identity determinism, bitemporal queries, merge conflict resolution, snapshot round-trips, insertion-order permutation invariance, and checkpoint/restart replay.
+564 tests covering:
+- Identity determinism and Unicode convergence
+- Bitemporal queries and retraction semantics
+- Merge CRDT properties (commutativity, associativity, idempotency) via Hypothesis
+- Snapshot round-trips and permutation invariance
+- End-to-end pipeline: ingest, query, merge, resolution
+- MCP tool handler operations
 
-## Core API
+## Known Limitations
 
-```python
-from dks import ClaimCore, KnowledgeStore, ValidTime, TransactionTime, canonicalize_text
+- **Interval surgery**: DESIGN.md target 6 (overlap resolution for partial valid-time conflicts) is unimplemented.
+- **NumpyIndex**: Brute-force cosine similarity, good for <100K vectors. Swap in FAISS/Annoy for scale.
+- **LLMExtractor**: Requires user-provided `llm_fn` callable. No built-in model inference.
+- **No persistence for search index**: Index is in-memory only. Rebuild after load/merge.
 
-# Create a knowledge store
-store = KnowledgeStore()
+## Design Documents
 
-# Canonicalize text for stable identity
-text = canonicalize_text("The CEO of Apple is Tim Cook")
+- [`research/DESIGN.md`](research/DESIGN.md) — V1+V2 design targets and core entity definitions
+- [`research/FAILURE_MODES.md`](research/FAILURE_MODES.md) — 20 core failure modes and mitigations
+- [`research/DECISION_LOG.md`](research/DECISION_LOG.md) — Architectural decision log
 
-# Create claims with valid-time intervals
-claim = ClaimCore(
-    claim_type_id="org.ceo_of@v1",
-    role_bindings={"subject": "tim_cook", "object": "apple_inc"},
-)
+## Model Recommendations
 
-# Assert revisions with bitemporal coordinates
-vt = ValidTime(start=2011, end=None)
-tt = TransactionTime(tx_id=(1, "replica_a", 1))
-store.assert_revision(claim, vt, tt)
-
-# Query as-of any point in transaction time
-result = store.query_as_of(claim.core_id, valid_at=2023, tx_asof=tt)
-
-# Merge two stores deterministically
-other_store = KnowledgeStore()
-merge_result = store.merge(other_store)
-# merge_result.conflicts contains any CF-01..CF-04 conflict records
-```
-
-## Exported Symbols (26)
-
-| Category | Symbols |
-|----------|---------|
-| **Core types** | `ClaimCore`, `ClaimRevision`, `ValidTime`, `TransactionTime`, `Provenance`, `RelationEdge` |
-| **Store** | `KnowledgeStore`, `MergeResult`, `MergeConflict`, `ConflictCode` |
-| **Query projections** | `RevisionLifecycleProjection`, `RevisionLifecycleTransition`, `RelationLifecycleProjection`, `RelationLifecycleTransition`, `RelationResolutionProjection`, `RelationResolutionTransition`, `RelationLifecycleSignatureProjection`, `RelationLifecycleSignatureTransition` |
-| **Fingerprinting** | `DeterministicStateFingerprint`, `DeterministicStateFingerprintTransition`, `MergeConflictProjection`, `MergeConflictProjectionTransition` |
-| **Snapshot** | `SnapshotValidationError`, `SnapshotValidationReport` |
-| **Utilities** | `canonicalize_text` |
-
-## Project Structure
-
-```
-src/dks/
-  __init__.py          26 exported symbols (public API)
-  core.py              ~5,100 lines, single-file V1 implementation
-tests/                 86 test files, 475 tests
-tools/
-  post_iter_verify.cmd Test runner script
-  function_smoke.py    API smoke test
-research/
-  DESIGN.md            V1 design targets and core entity definitions
-  STATE.md             Implementation completeness tracker
-  FAILURE_MODES.md     20 core failure modes and mitigations
-  DECISION_LOG.md      Architectural decisions summary
-  EXECUTION_GATE.md    Verification checklist
-  EVALUATION_RUBRIC.md Design evaluation rubric
-```
-
-## Design
-
-See [`research/DESIGN.md`](research/DESIGN.md) for the full V1 design document covering:
-- 10 design targets (semantic identity through surgery strategy governance)
-- 12 core entity definitions (ClaimCore through ConflictRecord)
-- Deterministic invariants and conflict classification
-
-## Background
-
-This project was originally built through an autonomous LLM iteration loop (135+ cycles). The V1 implementation is complete and tested. The repository has been cleaned up to contain only the essential code, tests, and documentation.
+From the project model registry:
+- **Extraction**: Qwen3-0.6B (600M params, agent-friendly, full precision ~700MB)
+- **Embeddings**: Qwen3-Embedding-0.6B (best <1B, 32-1024 dims, 100+ languages)
+- **Production**: Qwen3-4B (extraction) + Qwen3-Embedding-4B (embeddings)

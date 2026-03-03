@@ -78,3 +78,69 @@ The V1 implementation covers 10 design iterations:
 - `conflict_id = H(ns_conflict, conflict_class, subject_fingerprint, first_seen_tx_id)`.
 - `conflict_class` includes: `CF-01` (competing revisions), `CF-02` (epoch quarantine), `CF-03` (ID collision/poison), `CF-04` (orphan relation), and others.
 - Resolution state: `open` | `resolved`, with optional chosen winner.
+
+---
+
+## Design Targets (V2 Scope)
+
+V2 extends DKS from a storage backend to a complete agentic memory system while preserving the deterministic core.
+
+### DT-11: Extraction Protocol
+
+**Module:** `dks.extract`
+
+Protocol-based claim extraction with swappable backends:
+- `Extractor` Protocol: `.extract(text, claim_types) -> ExtractionResult`
+- `RegexExtractor`: Zero-dependency default for structured patterns
+- `LLMExtractor`: LLM-backed extraction for open-domain text
+
+Key design: ExtractionResult is non-deterministic output. Only `store.assert_revision()` crosses the commitment boundary.
+
+### DT-12: Entity Resolution as Data
+
+**Module:** `dks.resolve`
+
+Entity resolution decisions are stored AS CLAIMS in the KnowledgeStore:
+- `ClaimCore(claim_type="dks.entity_alias@v1", slots={"surface": mention, "entity": entity_id, "method": method})`
+- Resolution decisions are auditable, retractable, and temporally queryable
+- `CascadingResolver`: exact → normalized → embedding → LLM (tried in order)
+
+This makes entity resolution a first-class operation in the knowledge graph, not a black box preprocessing step.
+
+### DT-13: Temporal-Aware Search
+
+**Module:** `dks.index`
+
+Embedding-based semantic search filtered through `query_as_of()`:
+- `EmbeddingBackend` Protocol: `.embed(texts) -> vectors`
+- `SearchIndex`: Combines similarity with bitemporal visibility
+- Results honor the same temporal guarantees as direct queries
+
+### DT-14: Pipeline Orchestration
+
+**Module:** `dks.pipeline`
+
+Single canonical execution path: `Pipeline`
+- `ingest()`: extract → resolve → commit → index
+- `query()`: embed → search → temporal filter
+- `merge()`: deterministic store merge
+- `rebuild_index()`: reconstruct search index from store
+
+### DT-15: MCP Integration
+
+**Module:** `dks.mcp`
+
+Model Context Protocol server exposing Pipeline as tools:
+- `dks_ingest`: Ingest text into the store
+- `dks_query`: Semantic search with temporal filtering
+- `dks_query_exact`: Direct core_id lookup with bitemporal coordinates
+- `dks_snapshot`: Export canonical JSON
+- `dks_stats`: Store statistics
+
+## V2 Bug Fixes Applied to V1 Core
+
+- **Merge pending relations transfer**: `merge()` now processes `other._pending_relations`
+- **Merge variant/collision history transfer**: `merge()` now transfers `other._relation_variants` and `other._relation_collision_pairs`
+- **Retraction splash narrowing**: Retraction of `[2010,2020)` no longer suppresses asserted `[2015,2025)` in the overlap zone (per FM-009/INV-T5)
+- **Unicode NFC normalization**: `canonicalize_text()` applies `unicodedata.normalize("NFC")`
+- **Zero-width character stripping**: Invisible codepoints (zero-width spaces, BOM, bidi marks) stripped before identity hashing
