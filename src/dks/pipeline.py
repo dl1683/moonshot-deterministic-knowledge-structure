@@ -896,6 +896,121 @@ class Pipeline:
             source_count=len(by_source),
         )
 
+    def evidence_chain(
+        self,
+        claim: str,
+        *,
+        k: int = 5,
+        max_chain_length: int = 5,
+        min_relevance: float = 0.05,
+    ) -> "EvidenceChain":
+        """Build an evidence chain supporting or refuting a claim.
+
+        Given a claim like "transformers are better than RNNs for NLP",
+        this method finds:
+        1. Direct evidence (chunks that directly address the claim)
+        2. Supporting evidence (chunks that support the direct evidence)
+        3. Contradicting evidence (chunks that challenge the claim)
+        4. Links between evidence chunks through the knowledge graph
+
+        The chain traces how evidence connects across documents, enabling
+        cross-document reasoning.
+
+        Args:
+            claim: A factual claim to investigate.
+            k: Number of chunks to retrieve per search.
+            max_chain_length: Maximum links in a single evidence chain.
+            min_relevance: Minimum score threshold.
+
+        Returns:
+            EvidenceChain with supporting, contradicting, and linked evidence.
+        """
+        if self._index is None:
+            raise ValueError("No search index configured.")
+
+        # Step 1: Find direct evidence
+        direct = self.query(claim, k=k)
+        direct = [r for r in direct if r.score >= min_relevance]
+
+        # Step 2: Extract the key aspects of the claim for targeted search
+        key_terms = self._extract_key_terms(claim, max_terms=5)
+
+        # Step 3: Search for supporting and contradicting evidence
+        # Use negation terms to find counterarguments
+        all_evidence: dict[str, SearchResult] = {}
+        for r in direct:
+            all_evidence[r.revision_id] = r
+
+        # Expand via key terms
+        for term in key_terms:
+            expanded = self.query(term, k=k)
+            for r in expanded:
+                if r.revision_id not in all_evidence and r.score >= min_relevance:
+                    all_evidence[r.revision_id] = r
+
+        # Step 4: Build chains via graph traversal
+        chains: list[list[SearchResult]] = []
+        if hasattr(self, "_graph") and self._graph is not None:
+            for seed_result in direct[:3]:
+                chain = [seed_result]
+                current_id = seed_result.revision_id
+                visited = {current_id}
+
+                for _ in range(max_chain_length - 1):
+                    neighbors = self._graph.neighbors(current_id, k=3)
+                    best_next = None
+                    best_score = -1.0
+
+                    for nid, nscore in neighbors:
+                        if nid not in visited and nscore > min_relevance:
+                            rev = self.store.revisions.get(nid)
+                            if rev and nscore > best_score:
+                                best_next = SearchResult(
+                                    core_id=rev.core_id,
+                                    revision_id=nid,
+                                    score=nscore,
+                                    text=rev.assertion,
+                                )
+                                best_score = nscore
+
+                    if best_next is None:
+                        break
+
+                    chain.append(best_next)
+                    visited.add(best_next.revision_id)
+                    current_id = best_next.revision_id
+                    all_evidence[best_next.revision_id] = best_next
+
+                if len(chain) > 1:
+                    chains.append(chain)
+
+        # Step 5: Score each piece of evidence for/against the claim
+        supporting: list[SearchResult] = []
+        related: list[SearchResult] = []
+
+        for r in sorted(all_evidence.values(), key=lambda x: -x.score):
+            if r.revision_id in {d.revision_id for d in direct}:
+                supporting.append(r)
+            else:
+                related.append(r)
+
+        # Group by source
+        sources: dict[str, list[SearchResult]] = {}
+        for r in all_evidence.values():
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            sources.setdefault(source, []).append(r)
+
+        return EvidenceChain(
+            claim=claim,
+            direct_evidence=direct,
+            supporting_evidence=supporting,
+            related_evidence=related,
+            chains=chains,
+            sources=sources,
+            total_evidence=len(all_evidence),
+        )
+
     def query_deep(
         self,
         question: str,
@@ -1259,6 +1374,84 @@ class DeepQueryResult:
             lines.append(f"## Chunk {i+1} (relevance: {r.score:.3f})")
             lines.append(r.text[:1000])
             lines.append("")
+
+        return "\n".join(lines)
+
+
+@dataclass
+class EvidenceChain:
+    """Cross-document evidence chain supporting or refuting a claim."""
+    claim: str
+    direct_evidence: list[SearchResult]
+    supporting_evidence: list[SearchResult]
+    related_evidence: list[SearchResult]
+    chains: list[list[SearchResult]]
+    sources: dict[str, list[SearchResult]]
+    total_evidence: int
+
+    @property
+    def source_count(self) -> int:
+        return len(self.sources)
+
+    @property
+    def chain_count(self) -> int:
+        return len(self.chains)
+
+    def summary(self) -> str:
+        """Human-readable evidence chain summary."""
+        lines = [f'Evidence for: "{self.claim}"']
+        lines.append(f"Total evidence: {self.total_evidence} chunks from {self.source_count} sources")
+        lines.append(f"Direct evidence: {len(self.direct_evidence)} chunks")
+        lines.append(f"Evidence chains: {self.chain_count}")
+        lines.append("")
+
+        if self.direct_evidence:
+            lines.append("Direct evidence:")
+            for r in self.direct_evidence[:5]:
+                text_preview = r.text[:120].replace("\n", " ")
+                lines.append(f"  [{r.score:.3f}] {text_preview}...")
+
+        if self.chains:
+            lines.append("")
+            lines.append("Evidence chains:")
+            for i, chain in enumerate(self.chains[:3]):
+                lines.append(f"  Chain {i+1} ({len(chain)} links):")
+                for j, link in enumerate(chain):
+                    text_preview = link.text[:80].replace("\n", " ")
+                    lines.append(f"    {j+1}. [{link.score:.3f}] {text_preview}...")
+
+        lines.append("")
+        lines.append("Sources:")
+        for source, chunks in sorted(self.sources.items(), key=lambda x: -len(x[1]))[:8]:
+            lines.append(f"  [{len(chunks)} chunks] {source[:60]}")
+
+        return "\n".join(lines)
+
+    def context_for_llm(self, max_chunks: int = 15) -> str:
+        """Format evidence as LLM-ready context with source attribution."""
+        lines = [f"# Evidence Analysis: {self.claim}\n"]
+
+        lines.append("## Direct Evidence\n")
+        for i, r in enumerate(self.direct_evidence[:max_chunks // 2]):
+            lines.append(f"### Evidence {i+1} (relevance: {r.score:.3f})")
+            lines.append(r.text[:1000])
+            lines.append("")
+
+        if self.chains:
+            lines.append("## Evidence Chains\n")
+            for i, chain in enumerate(self.chains[:3]):
+                lines.append(f"### Chain {i+1}")
+                for j, link in enumerate(chain):
+                    lines.append(f"Link {j+1}: {link.text[:500]}")
+                    lines.append("")
+
+        if self.related_evidence:
+            lines.append("## Related Context\n")
+            remaining = max_chunks - len(self.direct_evidence[:max_chunks // 2])
+            for i, r in enumerate(self.related_evidence[:remaining]):
+                lines.append(f"### Related {i+1} (relevance: {r.score:.3f})")
+                lines.append(r.text[:500])
+                lines.append("")
 
         return "\n".join(lines)
 

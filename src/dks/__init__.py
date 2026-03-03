@@ -59,7 +59,7 @@ from .index import (
     TfidfSearchIndex,
 )
 
-from .pipeline import Pipeline, ReasoningResult, CoverageReport, DeepQueryResult, QueryFacet
+from .pipeline import Pipeline, ReasoningResult, CoverageReport, DeepQueryResult, EvidenceChain, QueryFacet
 
 from .mcp import MCPToolHandler
 
@@ -120,6 +120,7 @@ __all__ = [
     "ReasoningResult",
     "CoverageReport",
     "DeepQueryResult",
+    "EvidenceChain",
     "QueryFacet",
     # V2 MCP
     "MCPToolHandler",

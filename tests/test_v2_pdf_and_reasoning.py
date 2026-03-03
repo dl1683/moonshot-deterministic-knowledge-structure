@@ -489,6 +489,18 @@ class TestCrossEncoderReranker:
         reranker = CrossEncoderReranker("cross-encoder/ms-marco-MiniLM-L-6-v2")
         assert reranker.rerank("query", []) == []
 
+    def test_rerank_scores_are_cross_encoder_scale(self) -> None:
+        """Cross-encoder scores should be in a different range than cosine similarity."""
+        from dks import CrossEncoderReranker
+        reranker = CrossEncoderReranker("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        results = [
+            SearchResult(core_id="c1", revision_id="r1", score=0.5,
+                        text="machine learning uses neural networks"),
+        ]
+        reranked = reranker.rerank("what is machine learning", results)
+        # Cross-encoder scores are typically in [-15, 15] range, not [0, 1]
+        assert abs(reranked[0].score) > 1.0
+
     def test_pipeline_with_reranker(self) -> None:
         """Pipeline should use reranker when configured."""
         from dks import CrossEncoderReranker
@@ -519,3 +531,85 @@ class TestCrossEncoderReranker:
         assert len(results) >= 1
         # Cross-encoder should rank the neural network text highest
         assert "neural" in results[0].text or "deep learning" in results[0].text
+
+
+# ---- Evidence Chain Tests ----
+
+
+class TestEvidenceChain:
+    """Tests for cross-document evidence chain reasoning."""
+
+    def _make_pipeline_with_graph(self) -> Pipeline:
+        """Create a pipeline with graph for evidence chain testing."""
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        texts = [
+            "Neural networks use backpropagation to learn patterns from data. Deep learning uses multiple layers.",
+            "Transformers replaced RNNs for sequence modeling. Self-attention enables parallel processing.",
+            "Large language models can hallucinate incorrect facts. They lack grounded understanding of the world.",
+            "Reinforcement learning trains agents through reward signals. Deep RL combines neural nets with RL.",
+            "Self-supervised learning learns from unlabeled data. Contrastive learning is a popular approach.",
+            "Model compression reduces size through distillation. Small models can be surprisingly capable.",
+            "Computer vision uses CNNs for image recognition. Vision transformers are replacing CNNs.",
+            "Transfer learning pre-trains on large datasets. Fine-tuning adapts models to specific tasks.",
+        ]
+
+        for i, text in enumerate(texts):
+            core = ClaimCore(
+                claim_type="test",
+                slots={"text": text[:30], "source": f"doc_{i}.pdf"},
+            )
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=i+1, recorded_at=dt(2024)),
+                provenance=Provenance(source=f"doc_{i}.pdf"),
+                confidence_bp=5000,
+            )
+            search.add(rev.revision_id, text)
+
+        search.rebuild()
+        pipeline.build_graph(n_clusters=3)
+        return pipeline
+
+    def test_evidence_chain_returns_result(self) -> None:
+        from dks.pipeline import EvidenceChain
+        pipeline = self._make_pipeline_with_graph()
+        chain = pipeline.evidence_chain("neural networks learn patterns")
+        assert isinstance(chain, EvidenceChain)
+        assert chain.total_evidence > 0
+        assert chain.claim == "neural networks learn patterns"
+
+    def test_evidence_chain_finds_direct_evidence(self) -> None:
+        pipeline = self._make_pipeline_with_graph()
+        chain = pipeline.evidence_chain("transformers replaced RNNs")
+        assert len(chain.direct_evidence) > 0
+        # Should find the transformer text
+        found_transformer = any(
+            "transformer" in r.text.lower() or "rnn" in r.text.lower()
+            for r in chain.direct_evidence
+        )
+        assert found_transformer
+
+    def test_evidence_chain_multi_source(self) -> None:
+        pipeline = self._make_pipeline_with_graph()
+        chain = pipeline.evidence_chain("deep learning architectures")
+        assert chain.source_count >= 1
+
+    def test_evidence_chain_summary(self) -> None:
+        pipeline = self._make_pipeline_with_graph()
+        chain = pipeline.evidence_chain("model compression distillation")
+        summary = chain.summary()
+        assert "Evidence for" in summary
+        assert "model compression distillation" in summary.lower()
+        assert "chunks" in summary.lower()
+
+    def test_evidence_chain_context_for_llm(self) -> None:
+        pipeline = self._make_pipeline_with_graph()
+        chain = pipeline.evidence_chain("self-supervised learning")
+        context = chain.context_for_llm()
+        assert "Evidence Analysis" in context
+        assert "self-supervised learning" in context.lower()
