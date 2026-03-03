@@ -46,6 +46,7 @@ from .resolve import (
 )
 
 from .index import (
+    CrossEncoderReranker,
     DenseSearchIndex,
     EmbeddingBackend,
     HybridSearchIndex,
@@ -103,6 +104,7 @@ __all__ = [
     "ResolutionDecision",
     "Resolver",
     # V2 search
+    "CrossEncoderReranker",
     "DenseSearchIndex",
     "EmbeddingBackend",
     "HybridSearchIndex",

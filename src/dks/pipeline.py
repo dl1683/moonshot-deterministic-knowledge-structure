@@ -26,6 +26,7 @@ from .core import (
 )
 from .extract import ExtractionResult, Extractor, PDFExtractor, TextChunker
 from .index import (
+    CrossEncoderReranker,
     DenseSearchIndex,
     EmbeddingBackend,
     HybridSearchIndex,
@@ -57,6 +58,7 @@ class Pipeline:
         embedding_backend: EmbeddingBackend | None = None,
         *,
         search_index: TfidfSearchIndex | DenseSearchIndex | HybridSearchIndex | SearchIndex | None = None,
+        reranker: CrossEncoderReranker | None = None,
     ) -> None:
         self.store = store or KnowledgeStore()
         self._extractor = extractor
@@ -64,6 +66,7 @@ class Pipeline:
         self._index: TfidfSearchIndex | DenseSearchIndex | HybridSearchIndex | SearchIndex | None = search_index
         if self._index is None and embedding_backend is not None:
             self._index = SearchIndex(self.store, embedding_backend)
+        self._reranker = reranker
         self._tx_counter = 0
 
     def _next_tx(self) -> TransactionTime:
@@ -310,6 +313,16 @@ class Pipeline:
                 "No search index configured. "
                 "Set embedding_backend or search_index in Pipeline init."
             )
+
+        # If re-ranker is configured, retrieve more candidates then re-rank
+        if self._reranker is not None:
+            candidates = self._index.search(
+                question,
+                k=k * 4,  # Over-retrieve for better re-ranking
+                valid_at=valid_at,
+                tx_id=tx_id,
+            )
+            return self._reranker.rerank(question, candidates, top_k=k)
 
         return self._index.search(
             question,

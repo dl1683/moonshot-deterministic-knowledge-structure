@@ -898,6 +898,75 @@ class HybridSearchIndex:
         return self._tfidf.size
 
 
+class CrossEncoderReranker:
+    """Cross-encoder re-ranker for high-precision result ordering.
+
+    Bi-encoders (SentenceTransformer, TF-IDF) retrieve candidates fast but
+    sacrifice precision. Cross-encoders process query+document TOGETHER
+    through the full transformer, giving much better relevance scores.
+
+    Standard retrieve-then-rerank pattern:
+    1. Bi-encoder retrieves top-N candidates (fast, approximate)
+    2. Cross-encoder re-ranks those N candidates (slow, precise)
+
+    Default model: cross-encoder/ms-marco-MiniLM-L-6-v2 (trained on MS MARCO)
+    """
+
+    def __init__(
+        self,
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    ) -> None:
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers required: pip install sentence-transformers"
+            )
+        self._model = CrossEncoder(model_name)
+
+    def rerank(
+        self,
+        query: str,
+        results: list[SearchResult],
+        *,
+        top_k: int | None = None,
+    ) -> list[SearchResult]:
+        """Re-rank search results using cross-encoder scoring.
+
+        Args:
+            query: The original query string.
+            results: Candidate SearchResults from a bi-encoder/TF-IDF stage.
+            top_k: If provided, return only the top-k re-ranked results.
+
+        Returns:
+            Re-ranked list of SearchResult with updated scores.
+        """
+        if not results:
+            return []
+
+        # Build query-document pairs
+        pairs = [[query, r.text] for r in results]
+
+        # Score with cross-encoder
+        scores = self._model.predict(pairs)
+
+        # Build re-ranked results
+        reranked = []
+        for r, score in zip(results, scores):
+            reranked.append(SearchResult(
+                core_id=r.core_id,
+                revision_id=r.revision_id,
+                score=float(score),
+                text=r.text,
+            ))
+
+        reranked.sort(key=lambda r: -r.score)
+
+        if top_k is not None:
+            return reranked[:top_k]
+        return reranked
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
     if len(a) != len(b):

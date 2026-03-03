@@ -412,6 +412,13 @@ class TestHybridSearchIndex:
         results = hybrid.search("anything", k=5)
         assert len(results) == 0
 
+    def test_hybrid_batch_size(self) -> None:
+        from dks import HybridSearchIndex
+        store, items = self._make_store_with_data()
+        hybrid = HybridSearchIndex(store, "all-MiniLM-L6-v2")
+        hybrid.add_batch(items)
+        assert hybrid.size == 6
+
     def test_hybrid_alpha_weighting(self) -> None:
         """Different alpha values should shift results between keyword and semantic."""
         from dks import HybridSearchIndex
@@ -433,3 +440,82 @@ class TestHybridSearchIndex:
         # Both should return results
         assert len(r_tfidf) >= 1
         assert len(r_dense) >= 1
+
+
+# ---- Cross-Encoder Re-ranker Tests ----
+
+
+class TestCrossEncoderReranker:
+    """Tests for cross-encoder re-ranking."""
+
+    def test_rerank_improves_ordering(self) -> None:
+        from dks import CrossEncoderReranker
+        reranker = CrossEncoderReranker("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+        # Create fake search results with wrong ordering
+        results = [
+            SearchResult(core_id="c1", revision_id="r1", score=0.9,
+                        text="cats are adorable furry pets"),
+            SearchResult(core_id="c2", revision_id="r2", score=0.8,
+                        text="machine learning uses neural networks for pattern recognition"),
+            SearchResult(core_id="c3", revision_id="r3", score=0.7,
+                        text="deep learning is a subset of machine learning"),
+        ]
+
+        reranked = reranker.rerank("neural networks deep learning", results)
+        assert len(reranked) == 3
+        # The ML/DL results should be ranked higher than cats
+        ml_ids = {"r2", "r3"}
+        assert reranked[0].revision_id in ml_ids
+
+    def test_rerank_with_top_k(self) -> None:
+        from dks import CrossEncoderReranker
+        reranker = CrossEncoderReranker("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+        results = [
+            SearchResult(core_id="c1", revision_id="r1", score=0.5,
+                        text="cats are adorable pets"),
+            SearchResult(core_id="c2", revision_id="r2", score=0.5,
+                        text="dogs are loyal companions"),
+            SearchResult(core_id="c3", revision_id="r3", score=0.5,
+                        text="machine learning is powerful"),
+        ]
+
+        reranked = reranker.rerank("pets", results, top_k=2)
+        assert len(reranked) == 2
+
+    def test_rerank_empty(self) -> None:
+        from dks import CrossEncoderReranker
+        reranker = CrossEncoderReranker("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        assert reranker.rerank("query", []) == []
+
+    def test_pipeline_with_reranker(self) -> None:
+        """Pipeline should use reranker when configured."""
+        from dks import CrossEncoderReranker
+        store = KnowledgeStore()
+        index = TfidfSearchIndex(store)
+        reranker = CrossEncoderReranker("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        pipeline = Pipeline(store=store, search_index=index, reranker=reranker)
+
+        from dks import ClaimCore, Provenance
+        texts = [
+            "neural networks learn patterns from data through backpropagation",
+            "cats enjoy sleeping in warm sunny spots all day long",
+            "deep learning models have millions of trainable parameters",
+        ]
+        for text in texts:
+            core = ClaimCore(claim_type="test", slots={"text": text[:20]})
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                provenance=Provenance(source="test"),
+                confidence_bp=5000,
+            )
+            index.add(rev.revision_id, text)
+        index.rebuild()
+
+        results = pipeline.query("how do neural networks learn", k=2)
+        assert len(results) >= 1
+        # Cross-encoder should rank the neural network text highest
+        assert "neural" in results[0].text or "deep learning" in results[0].text
