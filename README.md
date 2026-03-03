@@ -8,18 +8,40 @@ pip install dks[pipeline] # + numpy for embedding search
 pip install dks[all]      # + LLM + MCP integration
 ```
 
-## 5-Line Quick Start
+## Quick Start
+
+```python
+from dks import Pipeline, KnowledgeStore
+
+# Create pipeline
+pipeline = Pipeline(store=KnowledgeStore())
+
+# Ingest text (automatically chunked and indexed)
+pipeline.ingest_text("Einstein developed the theory of relativity in 1905.", source="physics.txt")
+pipeline.ingest_text("Newton published Principia Mathematica in 1687.", source="physics.txt")
+pipeline.rebuild_index()
+
+# Search
+results = pipeline._search.query("who developed relativity")
+print(results[0].text)  # Einstein developed the theory of relativity...
+
+# Save and load
+pipeline.save("my_knowledge.dks")
+loaded = Pipeline.load("my_knowledge.dks")
+```
+
+### Advanced: Structured Extraction
 
 ```python
 from dks import Pipeline, RegexExtractor, NumpyIndex, ValidTime, TransactionTime
 from datetime import datetime, timezone
 
-# Configure pipeline
+# Configure with custom extractor
 extractor = RegexExtractor()
 extractor.register_pattern("residence", r"(?P<subject>\w+) lives in (?P<city>\w+)", ["subject", "city"])
 pipeline = Pipeline(extractor=extractor, embedding_backend=NumpyIndex(dimension=64))
 
-# Ingest (non-deterministic extraction → deterministic storage)
+# Ingest with explicit temporal context
 pipeline.ingest(
     "Alice lives in London",
     valid_time=ValidTime(start=datetime(2024, 1, 1, tzinfo=timezone.utc), end=None),
@@ -39,9 +61,11 @@ DKS is a **complete agentic memory system** built on a deterministic core:
 | **Extract** | `dks.extract` | Extract structured claims from text (regex or LLM) |
 | **Resolve** | `dks.resolve` | Map surface mentions to canonical entity IDs |
 | **Store** | `dks.core` | Deterministic bitemporal knowledge store |
-| **Search** | `dks.index` | Embedding-based semantic search with temporal filtering |
+| **Search** | `dks.index` | TF-IDF + Dense + Hybrid RRF search with temporal filtering |
+| **Reason** | `dks.search` | SearchEngine: answer synthesis, entity linking, deduplication |
+| **Explore** | `dks.explore` | Explorer: profiles, annotations, quality reports, insights |
 | **Orchestrate** | `dks.pipeline` | Single canonical execution path |
-| **Integrate** | `dks.mcp` | MCP server for AI agent integration |
+| **Integrate** | `dks.mcp` | MCP server (25 tools) for AI agent integration |
 
 ### The Commitment Boundary
 
@@ -72,15 +96,20 @@ DKS is a **complete agentic memory system** built on a deterministic core:
 
 ```
 dks/
-  core.py      Deterministic store (~5,400 lines, zero deps)
-  extract.py   Extractor Protocol + RegexExtractor + LLMExtractor
-  resolve.py   Resolver Protocol + ExactResolver + NormalizedResolver + CascadingResolver
-  index.py     EmbeddingBackend Protocol + SearchIndex + NumpyIndex
-  pipeline.py  Pipeline orchestrator
-  mcp.py       MCP tool handler
+  core.py      Deterministic bitemporal store (~5,300 lines, zero deps)
+  pipeline.py  Thin facade orchestrator (~780 lines)
+  search.py    SearchEngine: search, reasoning, synthesis (~2,950 lines)
+  explore.py   Explorer: profiles, annotations, quality, insights (~2,200 lines)
+  ingest.py    Ingester: extract → resolve → commit → index (~340 lines)
+  index.py     TF-IDF + Dense + Hybrid RRF + KnowledgeGraph (~1,050 lines)
+  extract.py   Extractor Protocol + RegexExtractor + LLMExtractor + PDFExtractor (~515 lines)
+  resolve.py   Resolver Protocol + cascading resolution (~160 lines)
+  mcp.py       MCPToolHandler (25 tools) (~615 lines)
+  audit.py     AuditEvent / AuditTrace / AuditManager (~175 lines)
+  results.py   Result dataclasses (~280 lines)
 ```
 
-**40 exported symbols** (26 V1 core + 14 V2 modules). All V1 symbols unchanged.
+**58 exported symbols** (26 V1 core + 32 V2/V3 modules). All V1 symbols unchanged.
 
 ## Entity Resolution as Data
 
@@ -122,20 +151,25 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-564 tests covering:
+1004 tests covering:
 - Identity determinism and Unicode convergence
 - Bitemporal queries and retraction semantics
 - Merge CRDT properties (commutativity, associativity, idempotency) via Hypothesis
 - Snapshot round-trips and permutation invariance
 - End-to-end pipeline: ingest, query, merge, resolution
 - MCP tool handler operations
+- Retraction-aware filtering across all subsystems
+- Property-based stress tests with Hypothesis
+- Full lifecycle tests: multi-source merge, temporal progression, save/load round-trip
 
 ## Known Limitations
 
+- **Not thread-safe**: `KnowledgeStore` mutations are not synchronized. Callers must synchronize externally in multi-threaded deployments.
 - **Interval surgery**: DESIGN.md target 6 (overlap resolution for partial valid-time conflicts) is unimplemented.
 - **NumpyIndex**: Brute-force cosine similarity, good for <100K vectors. Swap in FAISS/Annoy for scale.
 - **LLMExtractor**: Requires user-provided `llm_fn` callable. No built-in model inference.
 - **No persistence for search index**: Index is in-memory only. Rebuild after load/merge.
+- **Graph must be rebuilt after merge**: `build_graph()` required after `merge()` for graph-dependent operations.
 
 ## Design Documents
 
