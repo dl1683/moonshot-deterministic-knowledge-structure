@@ -408,15 +408,37 @@ class Pipeline:
     def rebuild_index(self) -> int:
         """Rebuild the search index from all revisions in the store.
 
+        Skips revisions whose core_id has been retracted.
+
         Returns:
             Number of revisions indexed.
         """
         if self._index is None:
             raise ValueError("No search index configured.")
 
+        # Find cores that have been retracted
+        retracted_cores: set[str] = set()
+        for rev in self.store.revisions.values():
+            if rev.status == "retracted":
+                retracted_cores.add(rev.core_id)
+
         items = []
         for revision_id, revision in self.store.revisions.items():
+            if revision.status != "asserted":
+                continue
+            if revision.core_id in retracted_cores:
+                continue
             items.append((revision_id, revision.assertion))
+
+        # Clear existing index data before rebuilding to prevent duplicates
+        tfidf = getattr(self._index, '_tfidf', None)
+        if tfidf is not None:
+            tfidf._texts.clear()
+            tfidf._revision_ids.clear()
+        dense = getattr(self._index, '_dense', None)
+        if dense is not None:
+            dense._texts.clear()
+            dense._revision_ids.clear()
         self._index.add_batch(items)
 
         # Rebuild index matrix

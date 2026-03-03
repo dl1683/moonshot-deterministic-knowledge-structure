@@ -54,6 +54,14 @@ class Explorer:
         """Return the current KnowledgeGraph (or None if not built)."""
         return self._graph_fn()
 
+    def _retracted_cores(self) -> set[str]:
+        """Return set of core_ids that have been retracted by a later revision."""
+        retracted: set[str] = set()
+        for rev in self.store.revisions.values():
+            if rev.status == "retracted":
+                retracted.add(rev.core_id)
+        return retracted
+
     # ---- Data Exploration & Interactive Review ----
 
     def profile(self) -> dict[str, Any]:
@@ -76,13 +84,19 @@ class Explorer:
         if self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
 
-        n_chunks = len(self.store.revisions)
+        retracted_cores = self._retracted_cores()
+        n_chunks = sum(1 for rev in self.store.revisions.values()
+                       if rev.status == "asserted" and rev.core_id not in retracted_cores)
         rev_to_cluster = getattr(self._graph, '_revision_cluster', {})
 
         # ---- Source analysis ----
         source_chunks: dict[str, list[str]] = {}  # source -> [revision_ids]
         source_clusters: dict[str, set[int]] = {}  # source -> {cluster_ids}
         for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
+                continue
             core = self.store.cores.get(rev.core_id)
             source = core.slots.get("source", "unknown") if core else "unknown"
             source_chunks.setdefault(source, []).append(rid)
@@ -142,6 +156,10 @@ class Explorer:
         sentence_doc_freq: Counter = Counter()
         sentence_text: dict[str, str] = {}  # hash -> sentence text
         for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
+                continue
             core = self.store.cores.get(rev.core_id)
             source = core.slots.get("source", rid) if core else rid
             sentences = re.split(r'(?<=[.!?])\s+|\n+', rev.assertion)
@@ -366,12 +384,18 @@ class Explorer:
         link_result = self._link_entities_fn(min_shared_entities=1)
         top_entities = link_result.get("top_entities", [])
 
+        retracted_cores = self._retracted_cores()
         rev_to_cluster = getattr(self._graph, '_revision_cluster', {})
-        n_chunks = len(self.store.revisions)
+        n_chunks = sum(1 for rev in self.store.revisions.values()
+                       if rev.status == "asserted" and rev.core_id not in retracted_cores)
 
         # Compute total sources
         all_sources: set[str] = set()
         for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
+                continue
             core = self.store.cores.get(rev.core_id)
             source = core.slots.get("source", "?") if core else "?"
             all_sources.add(source)
@@ -384,6 +408,10 @@ class Explorer:
         # Build entity -> revisions map using same approach as link_entities
         entity_revisions: dict[str, set[str]] = {}
         for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
+                continue
             tokens = word_re.findall(rev.assertion.lower())
             for i in range(len(tokens) - 1):
                 bg = f"{tokens[i]} {tokens[i+1]}"
@@ -547,6 +575,8 @@ class Explorer:
         """
         decisions: dict[str, str] = {}
         for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
             core = self.store.cores.get(rev.core_id)
             if core and core.claim_type == "dks.entity_review@v1":
                 entity = core.slots.get("entity", "")
@@ -2115,10 +2145,13 @@ class Explorer:
         Returns:
             List of dicts with source name, chunk count, and page range.
         """
+        retracted_cores = self._retracted_cores()
         sources: dict[str, dict[str, Any]] = {}
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
                 continue
             core = self.store.cores.get(rev.core_id)
             if core is None:

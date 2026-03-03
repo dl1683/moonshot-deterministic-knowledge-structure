@@ -344,6 +344,11 @@ class TfidfSearchIndex:
     def rebuild(self) -> None:
         self._tfidf.rebuild()
 
+    def _retracted_cores(self) -> set[str]:
+        """Return set of core_ids that have been retracted."""
+        return {rev.core_id for rev in self._store.revisions.values()
+                if rev.status == "retracted"}
+
     def search(
         self,
         query: str,
@@ -358,6 +363,7 @@ class TfidfSearchIndex:
 
         # Get more candidates than needed to account for temporal filtering
         raw_results = self._tfidf.search(query, k=k * 3)
+        retracted = self._retracted_cores()
 
         results: list[SearchResult] = []
         for revision_id, score, text in raw_results:
@@ -366,6 +372,10 @@ class TfidfSearchIndex:
 
             revision = self._store.revisions.get(revision_id)
             if revision is None:
+                continue
+
+            # Filter retracted revisions (status or core retracted)
+            if revision.status != "asserted" or revision.core_id in retracted:
                 continue
 
             if valid_at is not None and tx_id is not None:
@@ -795,6 +805,8 @@ class DenseSearchIndex:
             self._dense.rebuild()
 
         raw_results = self._dense.search(query, k=k * 3)
+        retracted = {rev.core_id for rev in self._store.revisions.values()
+                     if rev.status == "retracted"}
 
         results: list[SearchResult] = []
         for revision_id, score, text in raw_results:
@@ -803,6 +815,9 @@ class DenseSearchIndex:
 
             revision = self._store.revisions.get(revision_id)
             if revision is None:
+                continue
+
+            if revision.status != "asserted" or revision.core_id in retracted:
                 continue
 
             if valid_at is not None and tx_id is not None:
@@ -920,6 +935,8 @@ class HybridSearchIndex:
             text_lookup.setdefault(rid, text)
 
         # Apply temporal filtering and build results
+        retracted = {rev.core_id for rev in self._store.revisions.values()
+                     if rev.status == "retracted"}
         results: list[SearchResult] = []
         for rid, score in rrf_scores:
             if len(results) >= k:
@@ -927,6 +944,9 @@ class HybridSearchIndex:
 
             revision = self._store.revisions.get(rid)
             if revision is None:
+                continue
+
+            if revision.status != "asserted" or revision.core_id in retracted:
                 continue
 
             if valid_at is not None and tx_id is not None:

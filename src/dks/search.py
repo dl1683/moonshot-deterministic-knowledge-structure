@@ -1917,10 +1917,15 @@ class SearchEngine:
         """
         results: list[SearchResult] = []
         source_lower = source.lower()
+        retracted_cores = {r.core_id for r in self.store.revisions.values()
+                          if r.status == "retracted"}
 
         for rid, rev in self.store.revisions.items():
             if len(results) >= k:
                 break
+
+            if rev.status != "asserted" or rev.core_id in retracted_cores:
+                continue
 
             core = self.store.cores.get(rev.core_id)
             if core is None:
@@ -2091,7 +2096,7 @@ class SearchEngine:
                 if qr.revision_id == result.revision_id:
                     graph_distance = 0
                     break
-                path = graph.path(qr.revision_id, result.revision_id)
+                path = graph.path_between(qr.revision_id, result.revision_id)
                 if path is not None:
                     d = len(path) - 1
                     if graph_distance is None or d < graph_distance:

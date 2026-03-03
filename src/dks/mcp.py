@@ -383,7 +383,7 @@ class MCPToolHandler:
 
         k = args.get("k", 5)
         valid_at = _parse_datetime(args.get("valid_at"))
-        tx_id = self._tx_counter if valid_at else None
+        tx_id = self._pipeline._tx_counter if valid_at else None
 
         try:
             results = self._pipeline.query(
