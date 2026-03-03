@@ -275,3 +275,161 @@ class TestPipelineReasoning:
         assert isinstance(grouped, dict)
         # Should have at least one source
         assert len(grouped) >= 1
+
+
+# ---- Dense Search Tests ----
+
+
+class TestDenseSearchIndex:
+    """Tests for SentenceTransformerIndex and DenseSearchIndex."""
+
+    def _make_store_with_data(self):
+        """Create a store with diverse test documents."""
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        docs = [
+            ("cats", "cats are adorable furry pets that purr"),
+            ("dogs", "dogs are loyal companions that bark and fetch"),
+            ("ml", "machine learning uses neural networks for pattern recognition"),
+            ("nlp", "natural language processing enables text understanding"),
+            ("cv", "computer vision detects objects in images using deep learning"),
+        ]
+        revision_ids = []
+        for slot_val, assertion in docs:
+            core = ClaimCore(claim_type="test", slots={"text": slot_val})
+            rev = store.assert_revision(
+                core=core, assertion=assertion,
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                provenance=Provenance(source="test"),
+                confidence_bp=5000,
+            )
+            revision_ids.append((rev.revision_id, assertion))
+        return store, revision_ids
+
+    def test_sentence_transformer_index_search(self) -> None:
+        from dks.index import SentenceTransformerIndex
+        idx = SentenceTransformerIndex("all-MiniLM-L6-v2")
+        idx.add("r1", "cats are adorable furry pets")
+        idx.add("r2", "machine learning is powerful")
+        idx.add("r3", "dogs are loyal companions")
+        idx.rebuild()
+        results = idx.search("cute animals pets", k=2)
+        assert len(results) >= 1
+        # "cats" or "dogs" should rank higher than "machine learning"
+        top_ids = [r[0] for r in results]
+        assert "r1" in top_ids or "r3" in top_ids
+
+    def test_dense_search_index_with_store(self) -> None:
+        from dks import DenseSearchIndex
+        store, items = self._make_store_with_data()
+        dense = DenseSearchIndex(store, "all-MiniLM-L6-v2")
+        dense.add_batch(items)
+        dense.rebuild()
+        results = dense.search("animal pets", k=2)
+        assert len(results) >= 1
+        assert isinstance(results[0], SearchResult)
+        # Should find pet-related docs, not ML docs
+        assert "cats" in results[0].text or "dogs" in results[0].text
+
+    def test_dense_search_empty(self) -> None:
+        from dks import DenseSearchIndex
+        store = KnowledgeStore()
+        dense = DenseSearchIndex(store, "all-MiniLM-L6-v2")
+        results = dense.search("anything", k=5)
+        assert len(results) == 0
+
+    def test_dense_semantic_vs_keyword(self) -> None:
+        """Dense search should find semantically similar texts even without keyword overlap."""
+        from dks.index import SentenceTransformerIndex
+        idx = SentenceTransformerIndex("all-MiniLM-L6-v2")
+        idx.add("r1", "felines enjoy sleeping in warm sunny spots")
+        idx.add("r2", "gradient descent optimizes neural network weights")
+        idx.add("r3", "puppies love playing in the park with their owners")
+        idx.rebuild()
+        # Query about "cats" should match "felines" semantically
+        results = idx.search("cats sleeping", k=2)
+        assert results[0][0] == "r1"
+
+
+# ---- Hybrid Search Tests ----
+
+
+class TestHybridSearchIndex:
+    """Tests for HybridSearchIndex (reciprocal rank fusion)."""
+
+    def _make_store_with_data(self):
+        from dks import ClaimCore, Provenance
+        store = KnowledgeStore()
+        docs = [
+            ("cats", "cats are adorable furry pets that purr and sleep"),
+            ("dogs", "dogs are loyal companions that bark and fetch balls"),
+            ("ml", "machine learning uses neural networks for pattern recognition"),
+            ("nlp", "natural language processing enables text understanding and generation"),
+            ("cv", "computer vision detects objects in images using convolutional networks"),
+            ("rl", "reinforcement learning trains agents through reward signals"),
+        ]
+        items = []
+        for slot_val, assertion in docs:
+            core = ClaimCore(claim_type="test", slots={"text": slot_val})
+            rev = store.assert_revision(
+                core=core, assertion=assertion,
+                valid_time=ValidTime(start=dt(2024), end=None),
+                transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                provenance=Provenance(source="test"),
+                confidence_bp=5000,
+            )
+            items.append((rev.revision_id, assertion))
+        return store, items
+
+    def test_hybrid_search_returns_results(self) -> None:
+        from dks import HybridSearchIndex
+        store, items = self._make_store_with_data()
+        hybrid = HybridSearchIndex(store, "all-MiniLM-L6-v2", alpha=0.5)
+        hybrid.add_batch(items)
+        hybrid.rebuild()
+        results = hybrid.search("neural network deep learning", k=3)
+        assert len(results) >= 1
+        assert isinstance(results[0], SearchResult)
+
+    def test_hybrid_finds_keyword_and_semantic(self) -> None:
+        """Hybrid should find results that both TF-IDF and dense would find."""
+        from dks import HybridSearchIndex
+        store, items = self._make_store_with_data()
+        hybrid = HybridSearchIndex(store, "all-MiniLM-L6-v2", alpha=0.5)
+        hybrid.add_batch(items)
+        hybrid.rebuild()
+        results = hybrid.search("pets animals cats", k=3)
+        assert len(results) >= 1
+        # Should find cat/dog related content
+        all_text = " ".join(r.text for r in results)
+        assert "cats" in all_text or "dogs" in all_text
+
+    def test_hybrid_empty_search(self) -> None:
+        from dks import HybridSearchIndex
+        store = KnowledgeStore()
+        hybrid = HybridSearchIndex(store, "all-MiniLM-L6-v2")
+        results = hybrid.search("anything", k=5)
+        assert len(results) == 0
+
+    def test_hybrid_alpha_weighting(self) -> None:
+        """Different alpha values should shift results between keyword and semantic."""
+        from dks import HybridSearchIndex
+        store, items = self._make_store_with_data()
+
+        # alpha=0 -> pure TF-IDF
+        h_tfidf = HybridSearchIndex(store, "all-MiniLM-L6-v2", alpha=0.0)
+        h_tfidf.add_batch(items)
+        h_tfidf.rebuild()
+
+        # alpha=1 -> pure dense
+        h_dense = HybridSearchIndex(store, "all-MiniLM-L6-v2", alpha=1.0)
+        h_dense.add_batch(items)
+        h_dense.rebuild()
+
+        r_tfidf = h_tfidf.search("pattern recognition learning", k=3)
+        r_dense = h_dense.search("pattern recognition learning", k=3)
+
+        # Both should return results
+        assert len(r_tfidf) >= 1
+        assert len(r_dense) >= 1

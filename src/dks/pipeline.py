@@ -26,7 +26,9 @@ from .core import (
 )
 from .extract import ExtractionResult, Extractor, PDFExtractor, TextChunker
 from .index import (
+    DenseSearchIndex,
     EmbeddingBackend,
+    HybridSearchIndex,
     KnowledgeGraph,
     SearchIndex,
     SearchResult,
@@ -54,12 +56,12 @@ class Pipeline:
         resolver: Resolver | None = None,
         embedding_backend: EmbeddingBackend | None = None,
         *,
-        search_index: TfidfSearchIndex | SearchIndex | None = None,
+        search_index: TfidfSearchIndex | DenseSearchIndex | HybridSearchIndex | SearchIndex | None = None,
     ) -> None:
         self.store = store or KnowledgeStore()
         self._extractor = extractor
         self._resolver = resolver
-        self._index: TfidfSearchIndex | SearchIndex | None = search_index
+        self._index: TfidfSearchIndex | DenseSearchIndex | HybridSearchIndex | SearchIndex | None = search_index
         if self._index is None and embedding_backend is not None:
             self._index = SearchIndex(self.store, embedding_backend)
         self._tx_counter = 0
@@ -278,8 +280,8 @@ class Pipeline:
                 file=sys.stderr,
             )
 
-        # Rebuild TF-IDF index after batch ingestion
-        if isinstance(self._index, TfidfSearchIndex):
+        # Rebuild search index after batch ingestion
+        if hasattr(self._index, 'rebuild'):
             self._index.rebuild()
 
         return results
@@ -549,8 +551,8 @@ class Pipeline:
             items.append((revision_id, revision.assertion))
         self._index.add_batch(items)
 
-        # Rebuild TF-IDF matrix if using TF-IDF
-        if isinstance(self._index, TfidfSearchIndex):
+        # Rebuild index matrix
+        if hasattr(self._index, 'rebuild'):
             self._index.rebuild()
 
         return len(items)
@@ -588,12 +590,19 @@ class Pipeline:
         Returns:
             KnowledgeGraph with adjacency lists and topic clusters.
         """
-        if not isinstance(self._index, TfidfSearchIndex):
-            raise ValueError("Graph building requires TfidfSearchIndex.")
+        # Get the TF-IDF component from whichever index type we have
+        tfidf_component = None
+        if isinstance(self._index, TfidfSearchIndex):
+            tfidf_component = self._index._tfidf
+        elif isinstance(self._index, HybridSearchIndex):
+            tfidf_component = self._index._tfidf
+
+        if tfidf_component is None:
+            raise ValueError("Graph building requires TfidfSearchIndex or HybridSearchIndex.")
 
         self._graph = KnowledgeGraph()
         self._graph.build_from_tfidf(
-            self._index._tfidf,
+            tfidf_component,
             similarity_threshold=similarity_threshold,
             max_neighbors=max_neighbors,
             n_clusters=n_clusters,
@@ -1099,17 +1108,23 @@ class Pipeline:
         results: list[SearchResult],
     ) -> list[SearchResult]:
         """Re-rank results by relevance to the original question."""
-        if not isinstance(self._index, TfidfSearchIndex):
-            # For non-TF-IDF indices, just return as-is
+        # Get TF-IDF component for re-ranking
+        tfidf = None
+        if isinstance(self._index, TfidfSearchIndex):
+            tfidf = self._index._tfidf
+        elif isinstance(self._index, HybridSearchIndex):
+            tfidf = self._index._tfidf
+
+        if tfidf is None:
             return sorted(results, key=lambda r: -r.score)
 
         # Re-score against original question using TF-IDF
-        if not self._index._tfidf._fitted:
-            self._index._tfidf.rebuild()
+        if not tfidf._fitted:
+            tfidf.rebuild()
 
         try:
             from sklearn.metrics.pairwise import cosine_similarity
-            vectorizer = self._index._tfidf._vectorizer
+            vectorizer = tfidf._vectorizer
             q_vec = vectorizer.transform([question])
             text_vecs = vectorizer.transform([r.text for r in results])
             scores = cosine_similarity(q_vec, text_vecs)[0]
@@ -1162,7 +1177,6 @@ class ReasoningResult:
         return "\n".join(lines)
 
 
-@dataclass
 @dataclass
 class QueryFacet:
     """A single facet (sub-question) of a deep query."""

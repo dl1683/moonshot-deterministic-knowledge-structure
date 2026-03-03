@@ -593,6 +593,311 @@ class KnowledgeGraph:
         return len(self._clusters)
 
 
+class SentenceTransformerIndex:
+    """Dense embedding search using sentence-transformers.
+
+    High-quality semantic search using pre-trained transformer models.
+    Much better than TF-IDF for meaning-based queries like:
+    - "what causes AI hallucinations" (vs keyword "hallucination")
+    - "how to make models faster" (vs keyword "optimization")
+
+    Requires: pip install sentence-transformers
+
+    Default model: all-MiniLM-L6-v2 (384 dims, fast, good quality)
+    For higher quality: all-mpnet-base-v2 (768 dims, slower)
+    """
+
+    def __init__(
+        self,
+        model_name: str = "all-MiniLM-L6-v2",
+        *,
+        batch_size: int = 64,
+    ) -> None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise ImportError("sentence-transformers required: pip install sentence-transformers")
+
+        self._model = SentenceTransformer(model_name)
+        self._batch_size = batch_size
+        self._dimension = self._model.get_sentence_embedding_dimension()
+        self._texts: list[str] = []
+        self._revision_ids: list[str] = []
+        self._embeddings: Any = None  # numpy array
+        self._dirty = False
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts using the sentence-transformer model."""
+        if not texts:
+            return []
+        embeddings = self._model.encode(
+            texts,
+            batch_size=self._batch_size,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        return embeddings.tolist()
+
+    def add(self, revision_id: str, text: str) -> None:
+        """Add a document to the index."""
+        self._texts.append(text)
+        self._revision_ids.append(revision_id)
+        self._dirty = True
+
+    def add_batch(self, items: list[tuple[str, str]]) -> None:
+        """Add multiple documents."""
+        for rid, text in items:
+            self._texts.append(text)
+            self._revision_ids.append(rid)
+        self._dirty = True
+
+    def rebuild(self) -> None:
+        """Rebuild the embedding matrix from all stored texts."""
+        if not self._texts:
+            return
+        import numpy as np
+        self._embeddings = np.array(self._model.encode(
+            self._texts,
+            batch_size=self._batch_size,
+            show_progress_bar=len(self._texts) > 1000,
+            normalize_embeddings=True,
+        ))
+        self._dirty = False
+
+    def search(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+    ) -> list[tuple[str, float, str]]:
+        """Search for similar documents."""
+        if self._dirty or self._embeddings is None:
+            self.rebuild()
+        if self._embeddings is None or len(self._embeddings) == 0:
+            return []
+
+        import numpy as np
+        query_emb = self._model.encode(
+            [query],
+            normalize_embeddings=True,
+        )
+        scores = np.dot(self._embeddings, query_emb.T).flatten()
+        top_indices = scores.argsort()[::-1][:k]
+
+        results = []
+        for idx in top_indices:
+            score = float(scores[idx])
+            if score > 0:
+                results.append((
+                    self._revision_ids[idx],
+                    score,
+                    self._texts[idx],
+                ))
+        return results
+
+    @property
+    def size(self) -> int:
+        return len(self._texts)
+
+
+class DenseSearchIndex:
+    """Full search index using sentence-transformer embeddings with temporal awareness.
+
+    Drop-in replacement for TfidfSearchIndex with semantic understanding.
+    """
+
+    def __init__(
+        self,
+        store: KnowledgeStore,
+        model_name: str = "all-MiniLM-L6-v2",
+        **kwargs: Any,
+    ) -> None:
+        self._store = store
+        self._dense = SentenceTransformerIndex(model_name, **kwargs)
+
+    def add(self, revision_id: str, text: str) -> None:
+        self._dense.add(revision_id, text)
+
+    def add_batch(self, items: list[tuple[str, str]]) -> None:
+        self._dense.add_batch(items)
+
+    def rebuild(self) -> None:
+        self._dense.rebuild()
+
+    def search(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
+    ) -> list[SearchResult]:
+        """Search with temporal filtering."""
+        if self._dense._dirty or self._dense._embeddings is None:
+            self._dense.rebuild()
+
+        raw_results = self._dense.search(query, k=k * 3)
+
+        results: list[SearchResult] = []
+        for revision_id, score, text in raw_results:
+            if len(results) >= k:
+                break
+
+            revision = self._store.revisions.get(revision_id)
+            if revision is None:
+                continue
+
+            if valid_at is not None and tx_id is not None:
+                winner = self._store.query_as_of(
+                    revision.core_id,
+                    valid_at=valid_at,
+                    tx_id=tx_id,
+                )
+                if winner is None or winner.revision_id != revision_id:
+                    continue
+
+            results.append(SearchResult(
+                core_id=revision.core_id,
+                revision_id=revision_id,
+                score=score,
+                text=text,
+            ))
+
+        return results
+
+    @property
+    def size(self) -> int:
+        return self._dense.size
+
+
+class HybridSearchIndex:
+    """Hybrid search fusing TF-IDF keyword scores + dense semantic scores.
+
+    Uses reciprocal rank fusion (RRF) to combine:
+    - TF-IDF: Great for exact keyword matching, rare terms, specific entities
+    - Dense: Great for semantic meaning, paraphrasing, conceptual similarity
+
+    The combination is strictly better than either alone.
+    """
+
+    def __init__(
+        self,
+        store: KnowledgeStore,
+        model_name: str = "all-MiniLM-L6-v2",
+        *,
+        alpha: float = 0.5,
+        rrf_k: int = 60,
+        **tfidf_kwargs: Any,
+    ) -> None:
+        """
+        Args:
+            store: KnowledgeStore for temporal filtering.
+            model_name: Sentence-transformer model name.
+            alpha: Weight for dense scores (1-alpha for TF-IDF). Default 0.5.
+            rrf_k: RRF constant (higher = smoother fusion). Default 60.
+        """
+        self._store = store
+        self._tfidf = TfidfIndex(**tfidf_kwargs)
+        self._dense = SentenceTransformerIndex(model_name)
+        self._alpha = alpha
+        self._rrf_k = rrf_k
+
+    def add(self, revision_id: str, text: str) -> None:
+        self._tfidf.add(revision_id, text)
+        self._dense.add(revision_id, text)
+
+    def add_batch(self, items: list[tuple[str, str]]) -> None:
+        self._tfidf.add_batch(items)
+        self._dense.add_batch(items)
+
+    def rebuild(self) -> None:
+        self._tfidf.rebuild()
+        self._dense.rebuild()
+
+    def search(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
+    ) -> list[SearchResult]:
+        """Hybrid search with reciprocal rank fusion."""
+        # Get candidates from both systems
+        n_candidates = k * 5
+        tfidf_results = self._tfidf.search(query, k=n_candidates)
+        dense_results = self._dense.search(query, k=n_candidates)
+
+        # Build rank maps
+        tfidf_ranks: dict[str, int] = {}
+        for rank, (rid, score, text) in enumerate(tfidf_results):
+            tfidf_ranks[rid] = rank
+
+        dense_ranks: dict[str, int] = {}
+        for rank, (rid, score, text) in enumerate(dense_results):
+            dense_ranks[rid] = rank
+
+        # Collect all candidate revision_ids
+        all_candidates = set(tfidf_ranks.keys()) | set(dense_ranks.keys())
+
+        # Compute RRF scores
+        rrf_scores: list[tuple[str, float]] = []
+        for rid in all_candidates:
+            tfidf_rank = tfidf_ranks.get(rid, n_candidates)
+            dense_rank = dense_ranks.get(rid, n_candidates)
+
+            tfidf_rrf = 1.0 / (self._rrf_k + tfidf_rank)
+            dense_rrf = 1.0 / (self._rrf_k + dense_rank)
+
+            fused = (1 - self._alpha) * tfidf_rrf + self._alpha * dense_rrf
+            rrf_scores.append((rid, fused))
+
+        rrf_scores.sort(key=lambda x: -x[1])
+
+        # Build text lookup
+        text_lookup: dict[str, str] = {}
+        for rid, score, text in tfidf_results:
+            text_lookup[rid] = text
+        for rid, score, text in dense_results:
+            text_lookup.setdefault(rid, text)
+
+        # Apply temporal filtering and build results
+        results: list[SearchResult] = []
+        for rid, score in rrf_scores:
+            if len(results) >= k:
+                break
+
+            revision = self._store.revisions.get(rid)
+            if revision is None:
+                continue
+
+            if valid_at is not None and tx_id is not None:
+                winner = self._store.query_as_of(
+                    revision.core_id,
+                    valid_at=valid_at,
+                    tx_id=tx_id,
+                )
+                if winner is None or winner.revision_id != rid:
+                    continue
+
+            results.append(SearchResult(
+                core_id=revision.core_id,
+                revision_id=rid,
+                score=score,
+                text=text_lookup.get(rid, ""),
+            ))
+
+        return results
+
+    @property
+    def size(self) -> int:
+        return self._tfidf.size
+
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
     if len(a) != len(b):

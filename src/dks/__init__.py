@@ -46,11 +46,14 @@ from .resolve import (
 )
 
 from .index import (
+    DenseSearchIndex,
     EmbeddingBackend,
+    HybridSearchIndex,
     KnowledgeGraph,
     NumpyIndex,
     SearchIndex,
     SearchResult,
+    SentenceTransformerIndex,
     TfidfIndex,
     TfidfSearchIndex,
 )
@@ -100,11 +103,14 @@ __all__ = [
     "ResolutionDecision",
     "Resolver",
     # V2 search
+    "DenseSearchIndex",
     "EmbeddingBackend",
+    "HybridSearchIndex",
     "KnowledgeGraph",
     "NumpyIndex",
     "SearchIndex",
     "SearchResult",
+    "SentenceTransformerIndex",
     "TfidfIndex",
     "TfidfSearchIndex",
     # V2 pipeline
