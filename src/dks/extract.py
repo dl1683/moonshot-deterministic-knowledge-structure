@@ -4,12 +4,20 @@ This module provides the Extractor protocol and default implementations for
 extracting structured ClaimCore instances from text. The commitment boundary
 is explicit: ExtractionResult is non-deterministic output. Only when claims
 are committed via store.assert_revision() do they become deterministic data.
+
+Includes:
+- RegexExtractor: Zero-dependency pattern-based extraction
+- LLMExtractor: LLM-backed open-domain extraction
+- TextChunker: Smart text splitting with overlap for document ingestion
+- PDFExtractor: PDF text extraction + chunking via PyMuPDF
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from .core import ClaimCore, Provenance, canonicalize_text
@@ -222,3 +230,284 @@ class LLMExtractor:
             raw_text=text,
             metadata={"model_id": self._model_id},
         )
+
+
+class TextChunker:
+    """Split text into overlapping chunks for document ingestion.
+
+    Uses paragraph boundaries when possible, falls back to sentence
+    boundaries, then character-level splitting. Chunks maintain overlap
+    for context continuity.
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = 1000,
+        overlap: int = 200,
+        min_chunk: int = 50,
+    ) -> None:
+        self._chunk_size = chunk_size
+        self._overlap = overlap
+        self._min_chunk = min_chunk
+
+    def chunk(self, text: str) -> list[str]:
+        """Split text into overlapping chunks.
+
+        Strategy:
+        1. Split on double newlines (paragraph boundaries)
+        2. Merge small paragraphs to reach target chunk_size
+        3. Split oversized paragraphs on sentence boundaries
+        4. Apply overlap between consecutive chunks
+        """
+        if not text or not text.strip():
+            return []
+
+        # Split into paragraphs
+        paragraphs = re.split(r'\n\s*\n', text)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+
+        if not paragraphs:
+            return []
+
+        # Split oversized paragraphs into sentences
+        segments: list[str] = []
+        for para in paragraphs:
+            if len(para) <= self._chunk_size:
+                segments.append(para)
+            else:
+                # Split on sentence boundaries
+                sentences = re.split(r'(?<=[.!?])\s+', para)
+                for sent in sentences:
+                    if sent.strip():
+                        segments.append(sent.strip())
+
+        # Merge segments into chunks of target size
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+
+        for seg in segments:
+            seg_len = len(seg)
+
+            if current_len + seg_len + 1 > self._chunk_size and current:
+                chunk_text = '\n\n'.join(current)
+                if len(chunk_text) >= self._min_chunk:
+                    chunks.append(chunk_text)
+                current = [seg]
+                current_len = seg_len
+            else:
+                current.append(seg)
+                current_len += seg_len + 1
+
+        # Final chunk
+        if current:
+            chunk_text = '\n\n'.join(current)
+            if len(chunk_text) >= self._min_chunk:
+                chunks.append(chunk_text)
+
+        # Apply overlap: prepend tail of previous chunk to next chunk
+        if self._overlap > 0 and len(chunks) > 1:
+            overlapped: list[str] = [chunks[0]]
+            for i in range(1, len(chunks)):
+                prev = chunks[i - 1]
+                overlap_text = prev[-self._overlap:] if len(prev) > self._overlap else prev
+                # Find a word boundary in the overlap
+                space_idx = overlap_text.find(' ')
+                if space_idx > 0:
+                    overlap_text = overlap_text[space_idx + 1:]
+                overlapped.append(overlap_text + '\n\n' + chunks[i])
+            chunks = overlapped
+
+        return chunks
+
+
+class PDFExtractor:
+    """Extract text from PDFs and chunk into claims for ingestion.
+
+    Uses PyMuPDF (fitz) for PDF text extraction. Each chunk becomes a
+    ClaimCore with claim_type="document.chunk@v1" containing:
+    - source: filename
+    - chunk_idx: sequential index
+    - page_start: first page of chunk
+    - text: the chunk text (canonicalized)
+
+    Requires: pip install PyMuPDF
+    """
+
+    CLAIM_TYPE = "document.chunk@v1"
+
+    def __init__(
+        self,
+        chunker: TextChunker | None = None,
+        *,
+        extract_metadata: bool = True,
+    ) -> None:
+        self._chunker = chunker or TextChunker()
+        self._extract_metadata = extract_metadata
+
+    def extract_pdf(self, path: str | Path) -> ExtractionResult:
+        """Read a PDF file and extract chunked claims.
+
+        Args:
+            path: Path to the PDF file.
+
+        Returns:
+            ExtractionResult with one ClaimCore per chunk.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            raise ImportError("PyMuPDF required: pip install PyMuPDF")
+
+        path = Path(path)
+        filename = path.name
+
+        # Extract text from all pages
+        doc = fitz.open(str(path))
+        pages_text: list[tuple[int, str]] = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text("text")
+            if text and text.strip():
+                pages_text.append((page_num, text))
+        doc.close()
+
+        if not pages_text:
+            return ExtractionResult(
+                claims=(),
+                provenance=(),
+                raw_text="",
+                metadata={"source": filename, "error": "no text extracted"},
+            )
+
+        # Combine all page text with page markers
+        full_text = ""
+        page_boundaries: list[tuple[int, int]] = []  # (char_offset, page_num)
+        for page_num, text in pages_text:
+            page_boundaries.append((len(full_text), page_num))
+            full_text += text + "\n\n"
+
+        # Clean up common PDF artifacts
+        full_text = self._clean_pdf_text(full_text)
+
+        # Chunk the text
+        chunks = self._chunker.chunk(full_text)
+
+        if not chunks:
+            return ExtractionResult(
+                claims=(),
+                provenance=(),
+                raw_text=full_text[:500],
+                metadata={"source": filename, "error": "no chunks produced"},
+            )
+
+        # Map chunks to page numbers
+        claims: list[ClaimCore] = []
+        provenances: list[Provenance] = []
+
+        for idx, chunk_text in enumerate(chunks):
+            # Find which page this chunk starts on
+            chunk_start = full_text.find(chunk_text[:100])
+            page_start = 0
+            if chunk_start >= 0:
+                for offset, pnum in page_boundaries:
+                    if offset <= chunk_start:
+                        page_start = pnum
+
+            claim = ClaimCore(
+                claim_type=self.CLAIM_TYPE,
+                slots={
+                    "source": canonicalize_text(filename),
+                    "chunk_idx": str(idx),
+                    "page_start": str(page_start),
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            claims.append(claim)
+            provenances.append(Provenance(
+                source=f"pdf:{filename}",
+                evidence_ref=chunk_text,
+            ))
+
+        metadata: dict[str, Any] = {
+            "source": filename,
+            "total_pages": len(pages_text),
+            "total_chunks": len(chunks),
+            "total_chars": len(full_text),
+        }
+
+        if self._extract_metadata and pages_text:
+            try:
+                doc = fitz.open(str(path))
+                md = doc.metadata
+                if md:
+                    for key in ("title", "author", "subject"):
+                        if md.get(key):
+                            metadata[key] = md[key]
+                doc.close()
+            except Exception:
+                pass
+
+        return ExtractionResult(
+            claims=tuple(claims),
+            provenance=tuple(provenances),
+            raw_text=full_text[:1000],
+            metadata=metadata,
+        )
+
+    def extract(
+        self,
+        text: str,
+        *,
+        claim_types: list[str] | None = None,
+    ) -> ExtractionResult:
+        """Satisfy Extractor protocol — chunk text directly."""
+        if claim_types and self.CLAIM_TYPE not in claim_types:
+            return ExtractionResult(claims=(), provenance=(), raw_text=text)
+
+        chunks = self._chunker.chunk(text)
+        claims: list[ClaimCore] = []
+        provenances: list[Provenance] = []
+
+        for idx, chunk_text in enumerate(chunks):
+            claim = ClaimCore(
+                claim_type=self.CLAIM_TYPE,
+                slots={
+                    "source": "text_input",
+                    "chunk_idx": str(idx),
+                    "page_start": "0",
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            claims.append(claim)
+            provenances.append(Provenance(
+                source="chunker",
+                evidence_ref=chunk_text,
+            ))
+
+        return ExtractionResult(
+            claims=tuple(claims),
+            provenance=tuple(provenances),
+            raw_text=text[:1000],
+            metadata={"total_chunks": len(chunks)},
+        )
+
+    @staticmethod
+    def _clean_pdf_text(text: str) -> str:
+        """Clean common PDF extraction artifacts."""
+        # Remove excessive whitespace lines
+        text = re.sub(r'\n{4,}', '\n\n\n', text)
+        # Remove page headers/footers (lines with just numbers)
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+        # Fix hyphenation at line breaks
+        text = re.sub(r'(\w)-\n(\w)', r'\1\2', text)
+        # Normalize whitespace within lines (but preserve paragraph breaks)
+        lines = text.split('\n')
+        cleaned = []
+        for line in lines:
+            line = ' '.join(line.split())
+            cleaned.append(line)
+        text = '\n'.join(cleaned)
+        # Re-merge into paragraphs (single newlines become spaces within paragraphs)
+        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+        return text.strip()

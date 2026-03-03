@@ -32,7 +32,9 @@ from .extract import (
     ExtractionResult,
     Extractor,
     LLMExtractor,
+    PDFExtractor,
     RegexExtractor,
+    TextChunker,
 )
 
 from .resolve import (
@@ -45,12 +47,15 @@ from .resolve import (
 
 from .index import (
     EmbeddingBackend,
+    KnowledgeGraph,
     NumpyIndex,
     SearchIndex,
     SearchResult,
+    TfidfIndex,
+    TfidfSearchIndex,
 )
 
-from .pipeline import Pipeline
+from .pipeline import Pipeline, ReasoningResult, CoverageReport, DeepQueryResult, QueryFacet
 
 from .mcp import MCPToolHandler
 
@@ -85,7 +90,9 @@ __all__ = [
     "ExtractionResult",
     "Extractor",
     "LLMExtractor",
+    "PDFExtractor",
     "RegexExtractor",
+    "TextChunker",
     # V2 resolution
     "CascadingResolver",
     "ExactResolver",
@@ -94,11 +101,18 @@ __all__ = [
     "Resolver",
     # V2 search
     "EmbeddingBackend",
+    "KnowledgeGraph",
     "NumpyIndex",
     "SearchIndex",
     "SearchResult",
+    "TfidfIndex",
+    "TfidfSearchIndex",
     # V2 pipeline
     "Pipeline",
+    "ReasoningResult",
+    "CoverageReport",
+    "DeepQueryResult",
+    "QueryFacet",
     # V2 MCP
     "MCPToolHandler",
 ]
