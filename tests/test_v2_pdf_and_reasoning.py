@@ -1602,3 +1602,163 @@ class TestQueryExplanation:
         explanation = pipeline.explain("attention mechanisms", results[0])
         assert "provenance" in explanation
         assert "confidence_bp" in explanation["provenance"]
+
+
+# ---- Audit Trail Tests ----
+
+
+class TestAuditTrail:
+
+    def _make_pipeline(self) -> Pipeline:
+        from dks import Provenance, ClaimCore
+        from dks.pipeline import AuditTrace
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        docs = {
+            "paper_a.pdf": [
+                "Neural networks use backpropagation for training deep learning models.",
+                "Convolutional neural networks are excellent for image recognition tasks.",
+            ],
+            "paper_b.pdf": [
+                "Transformers use self-attention to process sequences in parallel.",
+                "Large language models can hallucinate incorrect facts about the world.",
+            ],
+            "paper_c.pdf": [
+                "Reinforcement learning trains agents using reward signals from the environment.",
+                "Deep reinforcement learning combines neural networks with RL algorithms.",
+            ],
+        }
+
+        for source, chunks in docs.items():
+            rev_ids = []
+            for i, text in enumerate(chunks):
+                core = ClaimCore(
+                    claim_type="document.chunk@v1",
+                    slots={"source": source, "chunk_idx": str(i), "text": text[:30]},
+                )
+                rev = store.assert_revision(
+                    core=core, assertion=text,
+                    valid_time=ValidTime(start=dt(2024), end=None),
+                    transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                    provenance=Provenance(source=source),
+                    confidence_bp=5000,
+                )
+                search.add(rev.revision_id, text)
+                rev_ids.append(rev.revision_id)
+            pipeline._chunk_siblings[source] = rev_ids
+
+        search.rebuild()
+        return pipeline
+
+    def test_audit_disabled_by_default(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.ask("neural networks")
+        assert pipeline.last_audit() is None
+
+    def test_audit_enabled_captures_trace(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("neural networks")
+        audit = pipeline.last_audit()
+        assert audit is not None
+        assert audit.operation == "ask"
+        assert audit.question == "neural networks"
+        assert len(audit.events) >= 2  # classify + dispatch at minimum
+
+    def test_audit_has_classification(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("Why do models hallucinate?")
+        audit = pipeline.last_audit()
+        assert audit is not None
+        classify_event = next(e for e in audit.events if e.stage == "classify")
+        assert classify_event.outputs["strategy"] == "exploratory"
+
+    def test_audit_has_dispatch_results(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("neural networks deep learning")
+        audit = pipeline.last_audit()
+        dispatch_event = next(e for e in audit.events if e.stage == "dispatch")
+        assert "total_chunks" in dispatch_event.outputs
+        assert "source_count" in dispatch_event.outputs
+        assert dispatch_event.outputs["total_chunks"] > 0
+
+    def test_audit_timing(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("transformers attention")
+        audit = pipeline.last_audit()
+        assert audit.total_duration_ms > 0
+        for event in audit.events:
+            assert event.duration_ms >= 0
+
+    def test_audit_to_dict(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("reinforcement learning")
+        audit = pipeline.last_audit()
+        d = audit.to_dict()
+        assert d["operation"] == "ask"
+        assert isinstance(d["events"], list)
+        assert len(d["events"]) >= 2
+
+    def test_audit_to_json(self) -> None:
+        import json
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("deep learning")
+        audit = pipeline.last_audit()
+        j = audit.to_json()
+        parsed = json.loads(j)
+        assert parsed["operation"] == "ask"
+        assert "events" in parsed
+
+    def test_render_audit_markdown(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("Why do neural networks need backpropagation?")
+        report = pipeline.render_audit()
+        assert "# Audit Report:" in report
+        assert "Decision Pipeline" in report
+        assert "Timing Breakdown" in report
+        assert "CLASSIFY" in report
+        assert "DISPATCH" in report
+
+    def test_render_audit_no_trace(self) -> None:
+        pipeline = self._make_pipeline()
+        report = pipeline.render_audit()
+        assert report == "No audit trace available."
+
+    def test_synthesize_audit_events(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.synthesize("How do neural networks learn?", k=3, hops=1)
+        audit = pipeline.last_audit()
+        assert audit is not None
+        assert audit.operation == "synthesize"
+        stages = [e.stage for e in audit.events]
+        assert "reason" in stages
+        assert "diversify" in stages
+        assert "expand" in stages
+        assert "themes" in stages
+
+    def test_audit_strategy_recorded(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("Compare transformers vs RNNs", strategy="comparison")
+        audit = pipeline.last_audit()
+        assert audit.strategy == "comparison"
+
+    def test_audit_can_be_disabled(self) -> None:
+        pipeline = self._make_pipeline()
+        pipeline.enable_audit(True)
+        pipeline.ask("neural networks")
+        assert pipeline.last_audit() is not None
+        pipeline.enable_audit(False)
+        pipeline.ask("transformers")
+        # last_audit should still be the previous one (not overwritten)
+        assert pipeline.last_audit().question == "neural networks"

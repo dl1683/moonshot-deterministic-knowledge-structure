@@ -38,6 +38,63 @@ from .index import (
 )
 from .resolve import CascadingResolver, ResolutionDecision, Resolver
 
+import time as _time
+import json as _json
+
+
+@dataclass
+class AuditEvent:
+    """A single decision point in the retrieval pipeline."""
+    stage: str         # e.g. "classify", "search", "expand", "diversify", "rerank"
+    action: str        # What happened
+    inputs: dict       # What went in
+    outputs: dict      # What came out
+    duration_ms: float # How long it took
+    metadata: dict = field(default_factory=dict)  # Extra details
+
+
+@dataclass
+class AuditTrace:
+    """Complete audit trail for a retrieval operation."""
+    operation: str     # "query", "reason", "synthesize", "ask", etc.
+    question: str
+    strategy: str = ""
+    events: list[AuditEvent] = field(default_factory=list)
+    started_at: str = ""
+    total_duration_ms: float = 0.0
+
+    def add(self, stage: str, action: str, inputs: dict, outputs: dict,
+            duration_ms: float, **metadata) -> None:
+        self.events.append(AuditEvent(
+            stage=stage, action=action, inputs=inputs,
+            outputs=outputs, duration_ms=duration_ms, metadata=metadata,
+        ))
+
+    def to_dict(self) -> dict:
+        """Serialize to JSON-compatible dict."""
+        return {
+            "operation": self.operation,
+            "question": self.question,
+            "strategy": self.strategy,
+            "started_at": self.started_at,
+            "total_duration_ms": self.total_duration_ms,
+            "events": [
+                {
+                    "stage": e.stage,
+                    "action": e.action,
+                    "inputs": e.inputs,
+                    "outputs": e.outputs,
+                    "duration_ms": e.duration_ms,
+                    "metadata": e.metadata,
+                }
+                for e in self.events
+            ],
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        """Serialize to JSON string."""
+        return _json.dumps(self.to_dict(), indent=indent, default=str)
+
 
 class Pipeline:
     """End-to-end orchestrator for DKS operations.
@@ -71,6 +128,121 @@ class Pipeline:
         self._tx_counter = 0
         # Track chunk siblings: source -> [revision_ids in order]
         self._chunk_siblings: dict[str, list[str]] = {}
+        # Audit trail
+        self._audit_enabled = False
+        self._last_audit: AuditTrace | None = None
+
+    # ---- Audit Trail ----
+
+    def enable_audit(self, enabled: bool = True) -> None:
+        """Enable or disable audit trail recording."""
+        self._audit_enabled = enabled
+
+    def last_audit(self) -> AuditTrace | None:
+        """Return the audit trace from the last audited operation."""
+        return self._last_audit
+
+    def _begin_audit(self, operation: str, question: str) -> AuditTrace | None:
+        """Start a new audit trace if auditing is enabled."""
+        if not self._audit_enabled:
+            return None
+        trace = AuditTrace(
+            operation=operation,
+            question=question,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return trace
+
+    def _finish_audit(self, trace: AuditTrace | None, t0: float) -> None:
+        """Finalize and store an audit trace."""
+        if trace is None:
+            return
+        trace.total_duration_ms = (_time.time() - t0) * 1000
+        self._last_audit = trace
+
+    def render_audit(self, trace: AuditTrace | None = None) -> str:
+        """Render an audit trace as a human-readable markdown report.
+
+        Args:
+            trace: The audit trace to render. Uses last_audit() if None.
+
+        Returns:
+            Markdown-formatted string showing the full decision tree.
+        """
+        if trace is None:
+            trace = self._last_audit
+        if trace is None:
+            return "No audit trace available."
+
+        lines = []
+        lines.append(f"# Audit Report: {trace.operation}")
+        lines.append("")
+        lines.append(f"**Question:** {trace.question}")
+        if trace.strategy:
+            lines.append(f"**Strategy:** {trace.strategy}")
+        lines.append(f"**Started:** {trace.started_at}")
+        lines.append(f"**Total Duration:** {trace.total_duration_ms:.1f}ms")
+        lines.append("")
+
+        # Decision tree
+        lines.append("## Decision Pipeline")
+        lines.append("")
+
+        for i, event in enumerate(trace.events):
+            # Stage header with timing
+            pct = (event.duration_ms / trace.total_duration_ms * 100
+                   if trace.total_duration_ms > 0 else 0)
+            lines.append(
+                f"### {i+1}. {event.stage.upper()}: {event.action} "
+                f"({event.duration_ms:.1f}ms, {pct:.0f}%)"
+            )
+            lines.append("")
+
+            # Inputs
+            if event.inputs:
+                lines.append("**Inputs:**")
+                for k, v in event.inputs.items():
+                    if isinstance(v, list) and len(v) > 5:
+                        lines.append(f"- {k}: [{len(v)} items]")
+                    elif isinstance(v, str) and len(v) > 100:
+                        lines.append(f"- {k}: {v[:100]}...")
+                    else:
+                        lines.append(f"- {k}: {v}")
+                lines.append("")
+
+            # Outputs
+            if event.outputs:
+                lines.append("**Outputs:**")
+                for k, v in event.outputs.items():
+                    if isinstance(v, list) and len(v) > 5:
+                        lines.append(f"- {k}: [{len(v)} items]")
+                    elif isinstance(v, str) and len(v) > 100:
+                        lines.append(f"- {k}: {v[:100]}...")
+                    else:
+                        lines.append(f"- {k}: {v}")
+                lines.append("")
+
+            # Metadata
+            if event.metadata:
+                lines.append("**Details:**")
+                for k, v in event.metadata.items():
+                    lines.append(f"- {k}: {v}")
+                lines.append("")
+
+        # Summary table
+        lines.append("## Timing Breakdown")
+        lines.append("")
+        lines.append("| Stage | Action | Duration | % |")
+        lines.append("|-------|--------|----------|---|")
+        for event in trace.events:
+            pct = (event.duration_ms / trace.total_duration_ms * 100
+                   if trace.total_duration_ms > 0 else 0)
+            lines.append(
+                f"| {event.stage} | {event.action} | "
+                f"{event.duration_ms:.1f}ms | {pct:.0f}% |"
+            )
+
+        return "\n".join(lines)
 
     def _next_tx(self) -> TransactionTime:
         """Auto-generate next transaction time."""
@@ -1438,13 +1610,36 @@ class Pipeline:
         if self._index is None:
             raise ValueError("No search index configured.")
 
+        t0_synth = _time.time()
+        audit = self._begin_audit("synthesize", question)
+
         # Step 1: Multi-hop retrieval
+        t_step = _time.time()
         reasoning = self.reason(question, k=k, hops=hops, valid_at=valid_at, tx_id=tx_id)
+        if audit:
+            audit.add("reason", f"Multi-hop retrieval ({hops} hops)",
+                      {"k": k, "hops": hops},
+                      {"total_chunks": reasoning.total_chunks,
+                       "source_count": reasoning.source_count,
+                       "hops_completed": reasoning.total_hops},
+                      (_time.time() - t_step) * 1000)
 
         # Step 1b: Diversify seed results for cross-source coverage
+        t_step = _time.time()
         diversified = self._diversify_results(reasoning.results, max_per_source=3)
+        if audit:
+            div_sources = set()
+            for r in diversified:
+                core = self.store.cores.get(r.core_id)
+                div_sources.add(core.slots.get("source", "?") if core else "?")
+            audit.add("diversify", "Round-robin source diversification",
+                      {"input_count": len(reasoning.results), "max_per_source": 3},
+                      {"output_count": len(diversified),
+                       "unique_sources": len(div_sources)},
+                      (_time.time() - t_step) * 1000)
 
         # Step 2: Expand context for each seed, grouped by source
+        t_step = _time.time()
         seed_groups: dict[str, list[SearchResult]] = {}  # source -> expanded chunks
         seen: set[str] = set()
 
@@ -1465,8 +1660,16 @@ class Pipeline:
                 seen.add(r.revision_id)
                 seed_groups.setdefault(source, []).append(r)
 
+        if audit:
+            total_expanded = sum(len(v) for v in seed_groups.values())
+            audit.add("expand", f"Context expansion (window={context_window})",
+                      {"context_window": context_window, "seed_count": len(diversified)},
+                      {"expanded_count": total_expanded,
+                       "source_groups": len(seed_groups)},
+                      (_time.time() - t_step) * 1000)
+
         # Step 2b: Interleave sources for diversity in final result order
-        # Round-robin across sources, sorted by best seed score
+        t_step = _time.time()
         for source in seed_groups:
             seed_groups[source].sort(key=lambda r: -r.score)
 
@@ -1488,6 +1691,13 @@ class Pipeline:
             round_idx += 1
             if not added:
                 break
+
+        if audit:
+            audit.add("interleave", "Source interleaving for final ordering",
+                      {"max_per_source": max_per_source,
+                       "source_count": len(sorted_group_keys)},
+                      {"final_count": len(expanded_results)},
+                      (_time.time() - t_step) * 1000)
 
         # Step 3: Group by source document
         by_source: dict[str, list[SearchResult]] = {}
@@ -1543,8 +1753,23 @@ class Pipeline:
             })
 
         # Step 5: Extract key themes
+        t_step = _time.time()
         all_text = " ".join(r.text[:200] for r in expanded_results[:20])
         themes = self._extract_key_terms(all_text, max_terms=8)
+        if audit:
+            audit.add("themes", "Key theme extraction",
+                      {"text_sample_count": min(20, len(expanded_results))},
+                      {"themes": themes},
+                      (_time.time() - t_step) * 1000)
+
+        if audit:
+            audit.add("assemble", "Build structured context",
+                      {"max_context_chars": max_context_chars,
+                       "sources_included": len(source_summaries)},
+                      {"context_chars": total_chars,
+                       "source_summaries": [s["source"][:40] for s in source_summaries[:5]]},
+                      0.0)  # assembly time already included in above steps
+            self._finish_audit(audit, t0_synth)
 
         return SynthesisResult(
             question=question,
@@ -1589,19 +1814,52 @@ class Pipeline:
         Returns:
             SynthesisResult with organized, source-attributed context.
         """
+        t0 = _time.time()
+        audit = self._begin_audit("ask", question)
+
+        # Classification
+        t_classify = _time.time()
         if strategy == "auto":
             strategy = self._classify_query(question)
+        if audit:
+            audit.strategy = strategy
+            audit.add("classify", f"Query classified as '{strategy}'",
+                      {"question": question, "input_strategy": "auto"},
+                      {"strategy": strategy},
+                      (_time.time() - t_classify) * 1000)
 
+        # Dispatch
+        t_dispatch = _time.time()
         if strategy == "factual":
-            return self._retrieve_factual(question, k=k, valid_at=valid_at, tx_id=tx_id)
+            result = self._retrieve_factual(question, k=k, valid_at=valid_at, tx_id=tx_id)
         elif strategy == "comparison":
-            return self._retrieve_comparison(question, k=k, valid_at=valid_at, tx_id=tx_id)
+            result = self._retrieve_comparison(question, k=k, valid_at=valid_at, tx_id=tx_id)
         elif strategy == "exploratory":
-            return self.synthesize(question, k=k, context_window=1, hops=3, valid_at=valid_at, tx_id=tx_id)
+            result = self.synthesize(question, k=k, context_window=1, hops=3, valid_at=valid_at, tx_id=tx_id)
         elif strategy == "multi-aspect":
-            return self._retrieve_multi_aspect(question, k=k, valid_at=valid_at, tx_id=tx_id)
+            result = self._retrieve_multi_aspect(question, k=k, valid_at=valid_at, tx_id=tx_id)
         else:
-            return self.synthesize(question, k=k, context_window=1, hops=2, valid_at=valid_at, tx_id=tx_id)
+            result = self.synthesize(question, k=k, context_window=1, hops=2, valid_at=valid_at, tx_id=tx_id)
+
+        if audit:
+            # Collect result summary
+            top_sources = []
+            for r in result.results[:5]:
+                core = self.store.cores.get(r.core_id)
+                source = core.slots.get("source", "?") if core else "?"
+                top_sources.append(f"[{r.score:.3f}] {source[:40]}")
+
+            audit.add("dispatch", f"Retrieved via '{strategy}' strategy",
+                      {"strategy": strategy, "k": k,
+                       "valid_at": str(valid_at), "tx_id": tx_id},
+                      {"total_chunks": result.total_chunks,
+                       "source_count": result.source_count,
+                       "themes": result.themes,
+                       "top_5": top_sources},
+                      (_time.time() - t_dispatch) * 1000)
+            self._finish_audit(audit, t0)
+
+        return result
 
     def _classify_query(self, question: str) -> str:
         """Classify a query into a retrieval strategy type.

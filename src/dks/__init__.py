@@ -59,7 +59,17 @@ from .index import (
     TfidfSearchIndex,
 )
 
-from .pipeline import Pipeline, ReasoningResult, CoverageReport, DeepQueryResult, EvidenceChain, QueryFacet, SynthesisResult
+from .pipeline import (
+    AuditEvent,
+    AuditTrace,
+    CoverageReport,
+    DeepQueryResult,
+    EvidenceChain,
+    Pipeline,
+    QueryFacet,
+    ReasoningResult,
+    SynthesisResult,
+)
 
 from .mcp import MCPToolHandler
 
@@ -116,12 +126,14 @@ __all__ = [
     "TfidfIndex",
     "TfidfSearchIndex",
     # V2 pipeline
-    "Pipeline",
-    "ReasoningResult",
+    "AuditEvent",
+    "AuditTrace",
     "CoverageReport",
     "DeepQueryResult",
     "EvidenceChain",
+    "Pipeline",
     "QueryFacet",
+    "ReasoningResult",
     "SynthesisResult",
     # V2 MCP
     "MCPToolHandler",
