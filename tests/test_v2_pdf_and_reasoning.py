@@ -2904,3 +2904,91 @@ class TestDataExploration:
         types = {s["type"] for s in suggestions}
         # Should have some variety
         assert len(types) >= 1
+
+    # --- Chunk Annotation ---
+
+    def test_annotate_chunk(self) -> None:
+        p = self._build_corpus()
+        rid = next(iter(p.store.revisions))
+        ann_id = p.annotate_chunk(rid, tags=["important", "review"], note="This is key")
+        assert ann_id is not None
+
+        # Verify stored
+        annotations = p.list_annotations(revision_id=rid)
+        assert len(annotations) == 1
+        assert "important" in annotations[0]["tags"]
+        assert "review" in annotations[0]["tags"]
+        assert annotations[0]["note"] == "this is key"  # canonicalized
+
+    def test_annotate_multiple_chunks(self) -> None:
+        p = self._build_corpus()
+        rids = list(p.store.revisions.keys())[:3]
+        for rid in rids:
+            p.annotate_chunk(rid, tags=["batch"])
+
+        all_anns = p.list_annotations()
+        assert len(all_anns) == 3
+
+    def test_search_by_tag(self) -> None:
+        p = self._build_corpus()
+        rid = next(iter(p.store.revisions))
+        p.annotate_chunk(rid, tags=["highlight"])
+
+        results = p.search_by_tag("highlight")
+        assert len(results) == 1
+        assert results[0]["revision_id"] == rid
+        assert "highlight" in results[0]["tags"]
+
+    def test_search_by_tag_empty(self) -> None:
+        p = self._build_corpus()
+        results = p.search_by_tag("nonexistent_tag")
+        assert len(results) == 0
+
+    def test_list_annotations_filter_by_tag(self) -> None:
+        p = self._build_corpus()
+        rids = list(p.store.revisions.keys())[:2]
+        p.annotate_chunk(rids[0], tags=["alpha", "beta"])
+        p.annotate_chunk(rids[1], tags=["beta", "gamma"])
+
+        alpha = p.list_annotations(tag="alpha")
+        assert len(alpha) == 1
+
+        beta = p.list_annotations(tag="beta")
+        assert len(beta) == 2
+
+    def test_annotate_nonexistent_chunk(self) -> None:
+        p = self._build_corpus()
+        with pytest.raises(ValueError, match="not found"):
+            p.annotate_chunk("nonexistent_id", tags=["test"])
+
+    def test_remove_annotation(self) -> None:
+        p = self._build_corpus()
+        rid = next(iter(p.store.revisions))
+        ann_id = p.annotate_chunk(rid, tags=["temp"])
+
+        assert p.remove_annotation(ann_id) is True
+        # After removal, should not appear in list
+        annotations = p.list_annotations(revision_id=rid)
+        assert len(annotations) == 0
+
+    def test_remove_nonexistent_annotation(self) -> None:
+        p = self._build_corpus()
+        assert p.remove_annotation("nonexistent") is False
+
+    # --- Corpus Summary ---
+
+    def test_summarize_corpus(self) -> None:
+        p = self._build_corpus()
+        summary = p.summarize_corpus()
+
+        assert isinstance(summary, str)
+        assert len(summary) > 50
+        assert "chunks" in summary.lower()
+        assert "source" in summary.lower()
+
+    def test_summarize_corpus_without_graph(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        p = Pipeline(store=store, search_index=search)
+        with pytest.raises(ValueError, match="Graph not built"):
+            p.summarize_corpus()

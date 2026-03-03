@@ -2958,6 +2958,248 @@ class Pipeline:
 
         return "\n".join(lines)
 
+    # ---- Chunk Annotation ----
+
+    def annotate_chunk(
+        self,
+        revision_id: str,
+        *,
+        tags: list[str] | None = None,
+        note: str = "",
+    ) -> str:
+        """Add user-defined tags and notes to a chunk.
+
+        Annotations are stored as deterministic claims (dks.annotation@v1),
+        making them auditable, retractable, and temporally queryable.
+
+        Args:
+            revision_id: The chunk to annotate.
+            tags: List of tag strings.
+            note: Free-text note.
+
+        Returns:
+            The annotation revision_id.
+        """
+        from .core import ClaimCore as _CC, Provenance as _P, ValidTime as _VT
+        from datetime import datetime as _dt
+
+        rev = self.store.revisions.get(revision_id)
+        if rev is None:
+            raise ValueError(f"Revision {revision_id} not found")
+
+        slots: dict[str, str] = {
+            "target_revision": revision_id,
+        }
+        if tags:
+            slots["tags"] = ",".join(tags)
+        if note:
+            slots["note"] = note
+
+        core = _CC(
+            claim_type="dks.annotation@v1",
+            slots=slots,
+        )
+
+        now = _dt.now()
+        tx = self._next_tx()
+
+        result = self.store.assert_revision(
+            core=core,
+            assertion=f"Annotation on {revision_id}: tags={tags or []}, note={note[:100]}",
+            valid_time=_VT(start=now, end=None),
+            transaction_time=tx,
+            provenance=_P(source="user_annotation"),
+            confidence_bp=9000,
+        )
+        return result.revision_id
+
+    def list_annotations(
+        self,
+        *,
+        revision_id: str | None = None,
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List annotations, optionally filtered by target chunk or tag.
+
+        Args:
+            revision_id: Filter to annotations on this specific chunk.
+            tag: Filter to annotations containing this tag.
+
+        Returns:
+            List of annotation dicts with target, tags, note, and timestamp.
+        """
+        # Find retracted core_ids (any core with a retracted revision)
+        retracted_cores: set[str] = set()
+        for rid, rev in self.store.revisions.items():
+            if rev.status == "retracted":
+                core = self.store.cores.get(rev.core_id)
+                if core and core.claim_type == "dks.annotation@v1":
+                    retracted_cores.add(rev.core_id)
+
+        annotations: list[dict[str, Any]] = []
+
+        for rid, rev in self.store.revisions.items():
+            if rev.status != "asserted":
+                continue
+            if rev.core_id in retracted_cores:
+                continue
+            core = self.store.cores.get(rev.core_id)
+            if core is None or core.claim_type != "dks.annotation@v1":
+                continue
+
+            target = core.slots.get("target_revision", "")
+            tags_str = core.slots.get("tags", "")
+            note = core.slots.get("note", "")
+            tag_list = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
+
+            # Apply filters
+            if revision_id and target != revision_id:
+                continue
+            if tag and tag not in tag_list:
+                continue
+
+            annotations.append({
+                "annotation_id": rid,
+                "target_revision": target,
+                "tags": tag_list,
+                "note": note,
+                "created_at": rev.transaction_time.recorded_at.isoformat(),
+            })
+
+        return annotations
+
+    def search_by_tag(self, tag: str) -> list[dict[str, Any]]:
+        """Find all chunks that have been annotated with a specific tag.
+
+        Args:
+            tag: The tag to search for.
+
+        Returns:
+            List of chunk dicts with revision_id, source, and preview text.
+        """
+        annotations = self.list_annotations(tag=tag)
+        results: list[dict[str, Any]] = []
+
+        for ann in annotations:
+            target_rid = ann["target_revision"]
+            rev = self.store.revisions.get(target_rid)
+            if rev is None:
+                continue
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", "?") if core else "?"
+
+            results.append({
+                "revision_id": target_rid,
+                "source": source,
+                "text": rev.assertion[:300],
+                "tags": ann["tags"],
+                "note": ann["note"],
+                "annotation_id": ann["annotation_id"],
+            })
+
+        return results
+
+    def remove_annotation(self, annotation_id: str) -> bool:
+        """Remove an annotation by retracting it.
+
+        Args:
+            annotation_id: The revision_id of the annotation to remove.
+
+        Returns:
+            True if retracted, False if not found.
+        """
+        from .core import Provenance as _P
+
+        rev = self.store.revisions.get(annotation_id)
+        if rev is None:
+            return False
+
+        core = self.store.cores.get(rev.core_id)
+        if core is None or core.claim_type != "dks.annotation@v1":
+            return False
+
+        tx = self._next_tx()
+        self.store.assert_revision(
+            core=core,
+            assertion=rev.assertion,
+            valid_time=rev.valid_time,
+            transaction_time=tx,
+            provenance=_P(source="annotation_removal"),
+            confidence_bp=rev.confidence_bp,
+            status="retracted",
+        )
+        return True
+
+    # ---- Corpus Summary ----
+
+    def summarize_corpus(self) -> str:
+        """Generate a text summary of what the corpus contains.
+
+        Uses cluster labels, source stats, temporal range, and corpus
+        metrics to produce a human-readable description. No LLM required.
+
+        Returns:
+            Multi-paragraph text summary.
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        stats = self.stats()
+        sources = self.list_sources()
+        topics = self.topics()
+        tl = self.ingestion_timeline()
+
+        lines: list[str] = []
+
+        # Opening
+        n_chunks = stats.get("revisions", 0)
+        n_sources = len(sources)
+        lines.append(f"This knowledge base contains {n_chunks:,} chunks from {n_sources} source documents.")
+
+        # Temporal range
+        if tl:
+            first_ts = tl[0]["timestamp"][:10]
+            last_ts = tl[-1]["timestamp"][:10]
+            if first_ts != last_ts:
+                lines.append(f"Data spans from {first_ts} to {last_ts}.")
+            else:
+                lines.append(f"All data was ingested on {first_ts}.")
+
+        # Source overview
+        if sources:
+            top_sources = sources[:min(5, len(sources))]
+            source_list = ", ".join(
+                f"{s['source'][:35]} ({s['chunks']} chunks)" for s in top_sources
+            )
+            lines.append(f"\nTop sources: {source_list}.")
+
+        # Topic overview
+        if topics:
+            top_topics = sorted(topics, key=lambda x: -x["size"])[:min(6, len(topics))]
+            topic_descriptions: list[str] = []
+            for t in top_topics:
+                labels = ", ".join(t["labels"][:3])
+                topic_descriptions.append(f"{labels} ({t['size']} chunks)")
+            lines.append(f"\nMain topics: {'; '.join(topic_descriptions)}.")
+
+        # Annotations and entity decisions
+        n_annotations = len(self.list_annotations())
+        decisions = self.get_entity_decisions()
+        if n_annotations > 0 or decisions:
+            curation_parts: list[str] = []
+            if n_annotations > 0:
+                curation_parts.append(f"{n_annotations} annotations")
+            if decisions:
+                n_accepted = sum(1 for v in decisions.values() if v == "accepted")
+                n_rejected = sum(1 for v in decisions.values() if v == "rejected")
+                if n_accepted:
+                    curation_parts.append(f"{n_accepted} accepted entities")
+                if n_rejected:
+                    curation_parts.append(f"{n_rejected} rejected entities")
+            lines.append(f"\nUser curation: {', '.join(curation_parts)}.")
+
+        return "\n".join(lines)
+
     def link_entities(
         self,
         *,
