@@ -948,6 +948,8 @@ class Pipeline:
         k: int = 5,
         depth: int = 2,
         similarity_threshold: float = 0.15,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> list[SearchResult]:
         """Discover related knowledge by traversing the similarity graph.
 
@@ -959,6 +961,8 @@ class Pipeline:
             k: Results per expansion.
             depth: How many levels of expansion.
             similarity_threshold: Minimum score to follow.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
 
         Returns:
             All discovered chunks, ordered by discovery path.
@@ -970,7 +974,7 @@ class Pipeline:
         frontier: list[str] = []  # queries to explore
 
         # Start with seed
-        seed_results = self.query(seed_query, k=k)
+        seed_results = self.query(seed_query, k=k, valid_at=valid_at, tx_id=tx_id)
         for r in seed_results:
             if r.score >= similarity_threshold:
                 discovered[r.revision_id] = r
@@ -983,7 +987,7 @@ class Pipeline:
                 # Use first few significant words as expansion query
                 words = text.split()[:10]
                 expansion = " ".join(words)
-                results = self.query(expansion, k=k)
+                results = self.query(expansion, k=k, valid_at=valid_at, tx_id=tx_id)
                 for r in results:
                     if r.revision_id not in discovered and r.score >= similarity_threshold:
                         discovered[r.revision_id] = r
@@ -999,6 +1003,8 @@ class Pipeline:
         topic: str,
         *,
         k: int = 20,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> CoverageReport:
         """Analyze what the store knows about a topic.
 
@@ -1008,6 +1014,8 @@ class Pipeline:
         Args:
             topic: Topic to analyze.
             k: Maximum chunks to analyze.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
 
         Returns:
             CoverageReport with sources, subtopics, and gap analysis.
@@ -1015,7 +1023,7 @@ class Pipeline:
         if self._index is None:
             raise ValueError("No search index configured.")
 
-        results = self.query(topic, k=k)
+        results = self.query(topic, k=k, valid_at=valid_at, tx_id=tx_id)
 
         # Group by source
         by_source: dict[str, list[SearchResult]] = {}
@@ -1043,6 +1051,8 @@ class Pipeline:
         k: int = 5,
         max_chain_length: int = 5,
         min_relevance: float = 0.05,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> "EvidenceChain":
         """Build an evidence chain supporting or refuting a claim.
 
@@ -1061,6 +1071,8 @@ class Pipeline:
             k: Number of chunks to retrieve per search.
             max_chain_length: Maximum links in a single evidence chain.
             min_relevance: Minimum score threshold.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
 
         Returns:
             EvidenceChain with supporting, contradicting, and linked evidence.
@@ -1069,7 +1081,7 @@ class Pipeline:
             raise ValueError("No search index configured.")
 
         # Step 1: Find direct evidence
-        direct = self.query(claim, k=k)
+        direct = self.query(claim, k=k, valid_at=valid_at, tx_id=tx_id)
         direct = [r for r in direct if r.score >= min_relevance]
 
         # Step 2: Extract the key aspects of the claim for targeted search
@@ -1083,7 +1095,7 @@ class Pipeline:
 
         # Expand via key terms
         for term in key_terms:
-            expanded = self.query(term, k=k)
+            expanded = self.query(term, k=k, valid_at=valid_at, tx_id=tx_id)
             for r in expanded:
                 if r.revision_id not in all_evidence and r.score >= min_relevance:
                     all_evidence[r.revision_id] = r
@@ -1157,6 +1169,8 @@ class Pipeline:
         *,
         k_per_subquery: int = 5,
         max_subqueries: int = 5,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> DeepQueryResult:
         """Intelligent query decomposition and targeted retrieval.
 
@@ -1172,6 +1186,8 @@ class Pipeline:
             question: Complex natural language question.
             k_per_subquery: Results per sub-query.
             max_subqueries: Maximum number of sub-queries to generate.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
 
         Returns:
             DeepQueryResult with organized context from across the store.
@@ -1186,7 +1202,7 @@ class Pipeline:
         relevant_clusters: dict[int, float] = {}
         if hasattr(self, "_graph") and self._graph is not None:
             for sq in subqueries:
-                results = self.query(sq, k=3)
+                results = self.query(sq, k=3, valid_at=valid_at, tx_id=tx_id)
                 for r in results:
                     cluster_id = self._graph.cluster_of(r.revision_id)
                     if cluster_id is not None:
@@ -1198,7 +1214,7 @@ class Pipeline:
         all_chunks: dict[str, SearchResult] = {}
 
         for sq in subqueries:
-            results = self.query(sq, k=k_per_subquery)
+            results = self.query(sq, k=k_per_subquery, valid_at=valid_at, tx_id=tx_id)
             for r in results:
                 all_chunks[r.revision_id] = r
 
@@ -1269,6 +1285,8 @@ class Pipeline:
         context_window: int = 1,
         hops: int = 2,
         max_context_chars: int = 30000,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> "SynthesisResult":
         """Full-stack retrieval and synthesis for answering complex questions.
 
@@ -1285,6 +1303,8 @@ class Pipeline:
             context_window: Chunks before/after each seed to include.
             hops: Number of multi-hop expansion rounds.
             max_context_chars: Maximum characters in the output context.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
 
         Returns:
             SynthesisResult with organized, source-attributed context.
@@ -1293,7 +1313,7 @@ class Pipeline:
             raise ValueError("No search index configured.")
 
         # Step 1: Multi-hop retrieval
-        reasoning = self.reason(question, k=k, hops=hops)
+        reasoning = self.reason(question, k=k, hops=hops, valid_at=valid_at, tx_id=tx_id)
 
         # Step 2: Expand context for top results
         seen: set[str] = set()
@@ -1385,6 +1405,8 @@ class Pipeline:
         *,
         k: int = 10,
         strategy: str = "auto",
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> SynthesisResult:
         """Intelligent adaptive retrieval — the single entry point for all queries.
 
@@ -1401,6 +1423,8 @@ class Pipeline:
             question: Any natural language question.
             k: Maximum seed results.
             strategy: Override the automatic strategy selection.
+            valid_at: Temporal filter.
+            tx_id: Transaction time cutoff.
 
         Returns:
             SynthesisResult with organized, source-attributed context.
@@ -1409,15 +1433,15 @@ class Pipeline:
             strategy = self._classify_query(question)
 
         if strategy == "factual":
-            return self._retrieve_factual(question, k=k)
+            return self._retrieve_factual(question, k=k, valid_at=valid_at, tx_id=tx_id)
         elif strategy == "comparison":
-            return self._retrieve_comparison(question, k=k)
+            return self._retrieve_comparison(question, k=k, valid_at=valid_at, tx_id=tx_id)
         elif strategy == "exploratory":
-            return self.synthesize(question, k=k, context_window=1, hops=3)
+            return self.synthesize(question, k=k, context_window=1, hops=3, valid_at=valid_at, tx_id=tx_id)
         elif strategy == "multi-aspect":
-            return self._retrieve_multi_aspect(question, k=k)
+            return self._retrieve_multi_aspect(question, k=k, valid_at=valid_at, tx_id=tx_id)
         else:
-            return self.synthesize(question, k=k, context_window=1, hops=2)
+            return self.synthesize(question, k=k, context_window=1, hops=2, valid_at=valid_at, tx_id=tx_id)
 
     def _classify_query(self, question: str) -> str:
         """Classify a query into a retrieval strategy type.
@@ -1480,9 +1504,11 @@ class Pipeline:
         question: str,
         *,
         k: int = 5,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> SynthesisResult:
         """Factual retrieval: direct search, high precision."""
-        results = self.query(question, k=k)
+        results = self.query(question, k=k, valid_at=valid_at, tx_id=tx_id)
 
         # Expand top result for context
         expanded: list[SearchResult] = []
@@ -1534,6 +1560,8 @@ class Pipeline:
         question: str,
         *,
         k: int = 10,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> SynthesisResult:
         """Comparison retrieval: search for both sides, cross-reference."""
         import re
@@ -1548,13 +1576,13 @@ class Pipeline:
             side = side.strip().rstrip("?.,!")
             if len(side) < 3:
                 continue
-            results = self.query(side, k=k // 2)
+            results = self.query(side, k=k // 2, valid_at=valid_at, tx_id=tx_id)
             side_results[side] = results
             for r in results:
                 all_results[r.revision_id] = r
 
         # Also search the full question
-        full_results = self.query(question, k=k)
+        full_results = self.query(question, k=k, valid_at=valid_at, tx_id=tx_id)
         for r in full_results:
             all_results[r.revision_id] = r
 
@@ -1593,10 +1621,12 @@ class Pipeline:
         question: str,
         *,
         k: int = 10,
+        valid_at: Optional[datetime] = None,
+        tx_id: Optional[int] = None,
     ) -> SynthesisResult:
         """Multi-aspect retrieval: decompose and search each aspect."""
         # Use query_deep for decomposition
-        deep = self.query_deep(question, k_per_subquery=k // 3, max_subqueries=4)
+        deep = self.query_deep(question, k_per_subquery=k // 3, max_subqueries=4, valid_at=valid_at, tx_id=tx_id)
 
         # Expand top results with context
         expanded: list[SearchResult] = []

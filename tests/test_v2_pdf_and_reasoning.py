@@ -906,3 +906,154 @@ class TestSynthesis:
         with_ctx = pipeline.synthesize("transformers", k=2, hops=1, context_window=1)
         # With context window should have more chunks
         assert with_ctx.total_chunks >= without.total_chunks
+
+
+# ---- Temporal-Aware Retrieval Tests ----
+
+
+class TestTemporalRetrieval:
+    """Test that all retrieval methods respect bitemporal filtering."""
+
+    def _make_pipeline(self) -> Pipeline:
+        """Build a pipeline with claims at different times."""
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        # Fact 1: asserted at tx_id=1, valid from 2020
+        core1 = ClaimCore(claim_type="fact@v1", slots={"subject": "neural networks", "source": "paper_a"})
+        store.assert_revision(
+            core=core1,
+            assertion="Neural networks use backpropagation for training deep learning models",
+            valid_time=ValidTime(start=dt(2020)),
+            transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024, 1, 1)),
+            provenance=Provenance(source="paper_a"),
+            confidence_bp=5000,
+            status="asserted",
+        )
+
+        # Fact 2: asserted at tx_id=2, valid from 2023
+        core2 = ClaimCore(claim_type="fact@v1", slots={"subject": "transformers", "source": "paper_b"})
+        store.assert_revision(
+            core=core2,
+            assertion="Transformers revolutionized natural language processing with attention mechanisms",
+            valid_time=ValidTime(start=dt(2023)),
+            transaction_time=TransactionTime(tx_id=2, recorded_at=dt(2024, 6, 1)),
+            provenance=Provenance(source="paper_b"),
+            confidence_bp=5000,
+            status="asserted",
+        )
+
+        # Fact 3: asserted at tx_id=3, valid 2021-2023
+        core3 = ClaimCore(claim_type="fact@v1", slots={"subject": "rnn", "source": "paper_c"})
+        store.assert_revision(
+            core=core3,
+            assertion="Recurrent neural networks were the dominant approach for sequence modeling",
+            valid_time=ValidTime(start=dt(2021), end=dt(2023)),
+            transaction_time=TransactionTime(tx_id=3, recorded_at=dt(2024, 9, 1)),
+            provenance=Provenance(source="paper_c"),
+            confidence_bp=5000,
+            status="asserted",
+        )
+
+        # Index all revisions
+        for rid, rev in store.revisions.items():
+            search.add(rid, rev.assertion)
+        search.rebuild()
+
+        return pipeline
+
+    def test_query_without_temporal_returns_all(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("neural networks transformers sequence modeling", k=10)
+        assert len(results) == 3  # All three facts
+
+    def test_query_with_valid_at_filters(self) -> None:
+        pipeline = self._make_pipeline()
+        # At valid_at=2022, only fact 1 (from 2020) and fact 3 (2021-2023) are valid
+        results = pipeline.query(
+            "neural networks transformers sequence modeling",
+            k=10,
+            valid_at=dt(2022, 6, 1),
+            tx_id=10,  # Far future tx so all are visible
+        )
+        # Fact 2 (valid from 2023) should be excluded
+        # Note: canonicalize_text lowercases assertions
+        texts = [r.text for r in results]
+        assert any("backpropagation" in t for t in texts)  # Fact 1
+        assert any("recurrent" in t for t in texts)  # Fact 3
+        assert not any("transformers revolutionized" in t for t in texts)  # Fact 2 excluded
+
+    def test_query_with_tx_id_filters(self) -> None:
+        pipeline = self._make_pipeline()
+        # With tx_id=1, only fact 1 is visible (tx_id=1)
+        results = pipeline.query(
+            "neural networks transformers sequence modeling",
+            k=10,
+            valid_at=dt(2025),
+            tx_id=1,
+        )
+        texts = [r.text for r in results]
+        assert any("backpropagation" in t for t in texts)  # Fact 1 visible
+        # Facts 2 and 3 have tx_id 2 and 3 respectively, so not visible at tx_id=1
+
+    def test_reason_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        # Reason should respect temporal filter
+        result = pipeline.reason(
+            "neural networks",
+            k=5,
+            hops=1,
+            valid_at=dt(2022, 6, 1),
+            tx_id=10,
+        )
+        texts = [r.text for r in result.results]
+        assert not any("transformers revolutionized" in t for t in texts)
+
+    def test_synthesize_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.synthesize(
+            "neural networks",
+            k=5,
+            hops=1,
+            context_window=0,
+            valid_at=dt(2022, 6, 1),
+            tx_id=10,
+        )
+        texts = [r.text for r in result.results]
+        assert not any("transformers revolutionized" in t for t in texts)
+
+    def test_ask_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        result = pipeline.ask(
+            "what is neural network training",
+            k=5,
+            valid_at=dt(2022, 6, 1),
+            tx_id=10,
+        )
+        texts = [r.text for r in result.results]
+        assert not any("transformers revolutionized" in t for t in texts)
+
+    def test_coverage_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        report = pipeline.coverage(
+            "neural networks",
+            k=10,
+            valid_at=dt(2022, 6, 1),
+            tx_id=10,
+        )
+        texts = [r.text for r in [chunk for chunks in report.sources.values() for chunk in chunks]]
+        assert not any("transformers revolutionized" in t for t in texts)
+
+    def test_evidence_chain_with_temporal(self) -> None:
+        pipeline = self._make_pipeline()
+        chain = pipeline.evidence_chain(
+            "neural networks for training",
+            k=5,
+            valid_at=dt(2022, 6, 1),
+            tx_id=10,
+        )
+        all_texts = [r.text for r in chain.direct_evidence + chain.related_evidence]
+        assert not any("transformers revolutionized" in t for t in all_texts)
