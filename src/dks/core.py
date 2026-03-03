@@ -2578,7 +2578,12 @@ class KnowledgeStore:
         self._merge_conflict_journal: tuple[tuple[int, MergeResult], ...] = ()
 
     def retracted_core_ids(self) -> set[str]:
-        """Return the set of core_ids that have been retracted by a later revision."""
+        """Return core_ids that have ANY retracted revision.
+
+        Retraction is permanent for a core_id: once a retraction revision
+        exists, the core is considered tainted regardless of later assertions.
+        To reassert a claim, create a NEW core with fresh content.
+        """
         return {rev.core_id for rev in self.revisions.values()
                 if rev.status == "retracted"}
 

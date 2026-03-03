@@ -526,10 +526,11 @@ class Pipeline:
             raise ValueError("Graph not built. Call build_graph() first.")
 
         neighbor_ids = self._graph.neighbors(revision_id, k=k)
+        retracted = self.store.retracted_core_ids()
         results = []
         for nid, score in neighbor_ids:
             rev = self.store.revisions.get(nid)
-            if rev:
+            if rev and rev.status == "asserted" and rev.core_id not in retracted:
                 results.append(SearchResult(
                     core_id=rev.core_id,
                     revision_id=nid,
@@ -567,10 +568,11 @@ class Pipeline:
             raise ValueError("Graph not built. Call build_graph() first.")
 
         member_ids = self._graph.cluster_members(cluster_id)[:k]
+        retracted = self.store.retracted_core_ids()
         results = []
         for rid in member_ids:
             rev = self.store.revisions.get(rid)
-            if rev:
+            if rev and rev.status == "asserted" and rev.core_id not in retracted:
                 results.append(SearchResult(
                     core_id=rev.core_id,
                     revision_id=rid,

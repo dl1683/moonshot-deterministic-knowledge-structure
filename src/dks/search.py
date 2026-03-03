@@ -2032,7 +2032,8 @@ class SearchEngine:
             root = find(i)
             clusters.setdefault(root, []).append(i)
 
-        # Build results — only clusters with 2+ members
+        # Build results — only clusters with 2+ active members
+        retracted = self.store.retracted_core_ids()
         result: list[list[SearchResult]] = []
         for members in clusters.values():
             if len(members) < 2:
@@ -2041,7 +2042,7 @@ class SearchEngine:
             for idx in members:
                 rid = tfidf._revision_ids[idx]
                 rev = self.store.revisions.get(rid)
-                if rev:
+                if rev and rev.status == "asserted" and rev.core_id not in retracted:
                     cluster_results.append(SearchResult(
                         core_id=rev.core_id,
                         revision_id=rid,

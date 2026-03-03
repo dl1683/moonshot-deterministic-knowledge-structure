@@ -108,18 +108,25 @@ class Explorer:
         cluster_labels = getattr(self._graph, '_cluster_labels', {})
 
         for cid, members in sorted(clusters.items()):
+            # Filter to active members only
+            active_members = [
+                rid for rid in members
+                if (rev := self.store.revisions.get(rid)) is not None
+                and rev.core_id not in retracted_cores
+            ]
+
             # Source distribution within this cluster
             cluster_sources: Counter = Counter()
-            for rid in members:
+            for rid in active_members:
                 core = self.store.cores.get(
                     self.store.revisions[rid].core_id
-                ) if rid in self.store.revisions else None
+                )
                 source = core.slots.get("source", "?") if core else "?"
                 cluster_sources[source] += 1
 
             # Sample chunks (first 3)
             samples = []
-            for rid in members[:3]:
+            for rid in active_members[:3]:
                 rev = self.store.revisions.get(rid)
                 if rev:
                     samples.append({
@@ -131,13 +138,14 @@ class Explorer:
             flags = []
             if len(cluster_sources) == 1:
                 flags.append("single_source")
-            dominant_source, dominant_count = cluster_sources.most_common(1)[0]
-            if dominant_count / max(len(members), 1) > 0.8:
-                flags.append(f"dominated_by:{dominant_source[:30]}")
+            if cluster_sources:
+                dominant_source, dominant_count = cluster_sources.most_common(1)[0]
+                if dominant_count / max(len(active_members), 1) > 0.8:
+                    flags.append(f"dominated_by:{dominant_source[:30]}")
 
             cluster_profiles.append({
                 "cluster_id": cid,
-                "size": len(members),
+                "size": len(active_members),
                 "labels": cluster_labels.get(cid, [])[:6],
                 "source_count": len(cluster_sources),
                 "top_sources": cluster_sources.most_common(3),
@@ -745,9 +753,16 @@ class Explorer:
                 "status": rev.status,
             })
 
+        # Count active members (excluding retracted) for accurate total
+        active_count = sum(
+            1 for rid in members
+            if (rev := self.store.revisions.get(rid)) is not None
+            and rev.core_id not in retracted_cores
+        )
+
         return {
             "cluster_id": cluster_id,
-            "total_members": len(members),
+            "total_members": active_count,
             "showing": len(chunks),
             "chunks": chunks,
         }
@@ -971,9 +986,10 @@ class Explorer:
         for cid, members in clusters.items():
             sources_in_cluster = set()
             for rid in members:
-                core = self.store.cores.get(
-                    self.store.revisions[rid].core_id
-                ) if rid in self.store.revisions else None
+                rev = self.store.revisions.get(rid)
+                if rev is None or rev.core_id in retracted_cores:
+                    continue
+                core = self.store.cores.get(rev.core_id)
                 if core:
                     sources_in_cluster.add(core.slots.get("source", "?"))
             if len(sources_in_cluster) == 1:
@@ -2112,8 +2128,12 @@ class Explorer:
 
         lines: list[str] = []
 
-        # Opening
-        n_chunks = stats.get("revisions", 0)
+        # Opening — count only active, non-retracted document chunks
+        retracted = self._retracted_cores()
+        n_chunks = sum(
+            1 for rev in self.store.revisions.values()
+            if rev.status == "asserted" and rev.core_id not in retracted
+        )
         n_sources = len(sources)
         lines.append(f"This knowledge base contains {n_chunks:,} chunks from {n_sources} source documents.")
 
