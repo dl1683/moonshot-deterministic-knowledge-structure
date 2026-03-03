@@ -2198,6 +2198,14 @@ class TestIntegration:
 
     # --- Full end-to-end ---
 
+    def test_entity_linking(self) -> None:
+        p = self._build_corpus()
+        # Need graph first
+        p.build_graph(n_clusters=3)
+        stats = p.link_entities(min_shared_entities=1)
+        assert stats["total_entities"] > 0
+        assert isinstance(stats["top_entities"], list)
+
     def test_complete_workflow(self) -> None:
         """Full workflow: ingest → query → reason → synthesize → answer → audit."""
         p = self._build_corpus()

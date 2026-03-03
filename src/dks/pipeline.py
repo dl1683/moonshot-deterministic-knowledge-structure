@@ -1137,6 +1137,143 @@ class Pipeline:
                 ))
         return results
 
+    def link_entities(
+        self,
+        *,
+        min_entity_length: int = 3,
+        min_shared_entities: int = 2,
+        max_edges_per_node: int = 10,
+    ) -> dict[str, Any]:
+        """Create entity-based cross-references between chunks.
+
+        Extracts key noun phrases from each chunk, finds chunks that share
+        entities across different documents, and adds explicit edges to
+        the knowledge graph. This enables multi-hop reasoning that follows
+        actual conceptual links rather than just keyword similarity.
+
+        Must be called AFTER build_graph().
+
+        Args:
+            min_entity_length: Minimum character length for an entity.
+            min_shared_entities: Minimum shared entities to create a link.
+            max_edges_per_node: Maximum entity edges per chunk.
+
+        Returns:
+            Dict with:
+              - total_entities: int (unique entities found)
+              - total_links: int (new graph edges added)
+              - top_entities: list of (entity, count) tuples
+        """
+        import re
+        from collections import Counter
+
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        # Step 1: Extract entities from each chunk
+        # Use capitalized multi-word phrases as entity candidates
+        entity_pattern = re.compile(
+            r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b'
+            r'|'
+            r'\b([A-Z]{2,}(?:\s+[A-Z]{2,})*)\b'  # Acronyms
+        )
+        # Also extract technical terms (lowercased multi-word phrases)
+        tech_pattern = re.compile(
+            r'\b((?:neural|deep|machine|reinforcement|self|cross|multi|pre|fine)'
+            r'[\-\s]'
+            r'(?:network|learning|model|encoder|decoder|attention|training|tuning'
+            r'|supervised|transformer|embedding)s?)\b',
+            re.IGNORECASE,
+        )
+
+        chunk_entities: dict[str, set[str]] = {}  # revision_id -> entity set
+        entity_chunks: dict[str, set[str]] = {}   # entity -> revision_ids
+
+        for rev_id, rev in self.store.revisions.items():
+            text = rev.assertion
+            entities: set[str] = set()
+
+            # Extract capitalized phrases (proper nouns, names)
+            for match in entity_pattern.finditer(text):
+                entity = (match.group(1) or match.group(2)).strip()
+                if len(entity) >= min_entity_length:
+                    entities.add(entity.lower())
+
+            # Extract technical terms
+            for match in tech_pattern.finditer(text):
+                entity = match.group(1).strip().lower()
+                if len(entity) >= min_entity_length:
+                    entities.add(entity)
+
+            chunk_entities[rev_id] = entities
+            for entity in entities:
+                entity_chunks.setdefault(entity, set()).add(rev_id)
+
+        # Step 2: Find cross-document entity links
+        # For each pair of chunks from different sources, count shared entities
+        total_links = 0
+
+        for rev_id, entities in chunk_entities.items():
+            core = self.store.cores.get(
+                self.store.revisions[rev_id].core_id
+            )
+            source = core.slots.get("source", "") if core else ""
+
+            # Find candidate neighbors via shared entities
+            neighbor_scores: dict[str, int] = {}
+            for entity in entities:
+                for other_id in entity_chunks.get(entity, set()):
+                    if other_id == rev_id:
+                        continue
+                    # Only cross-document links
+                    other_core = self.store.cores.get(
+                        self.store.revisions[other_id].core_id
+                    )
+                    other_source = other_core.slots.get("source", "") if other_core else ""
+                    if other_source == source:
+                        continue
+                    neighbor_scores[other_id] = neighbor_scores.get(other_id, 0) + 1
+
+            # Add edges for chunks with enough shared entities
+            edges_added = 0
+            for neighbor_id, shared_count in sorted(
+                neighbor_scores.items(), key=lambda x: -x[1]
+            ):
+                if shared_count < min_shared_entities:
+                    break
+                if edges_added >= max_edges_per_node:
+                    break
+
+                # Add to graph (score = shared entity count / max possible)
+                max_shared = min(len(chunk_entities.get(rev_id, set())),
+                                 len(chunk_entities.get(neighbor_id, set())))
+                edge_score = shared_count / max(max_shared, 1)
+
+                if rev_id not in self._graph._adjacency:
+                    self._graph._adjacency[rev_id] = []
+                # Check if edge already exists
+                existing = {nid for nid, _ in self._graph._adjacency.get(rev_id, [])}
+                if neighbor_id not in existing:
+                    self._graph._adjacency[rev_id].append((neighbor_id, edge_score))
+                    total_links += 1
+                    edges_added += 1
+
+        # Compute stats
+        all_entities = set()
+        for entities in chunk_entities.values():
+            all_entities.update(entities)
+
+        entity_counts = Counter()
+        for entity, chunks in entity_chunks.items():
+            if len(chunks) >= 2:  # Only entities appearing in multiple chunks
+                entity_counts[entity] = len(chunks)
+
+        return {
+            "total_entities": len(all_entities),
+            "total_links": total_links,
+            "top_entities": entity_counts.most_common(20),
+        }
+
     # ---- Reasoning Layer ----
 
     def reason(
