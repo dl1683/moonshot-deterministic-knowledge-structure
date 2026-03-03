@@ -26,9 +26,9 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from .audit import AuditManager, AuditTrace
-from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidTime, canonicalize_text
-from .index import CrossEncoderReranker, KnowledgeGraph, SearchIndex, SearchResult
+from .audit import AuditManager
+from .core import KnowledgeStore, Provenance
+from .index import KnowledgeGraph, SearchIndex, SearchResult
 from .results import CoverageReport, DeepQueryResult, EvidenceChain, QueryFacet, ReasoningResult, SynthesisResult
 
 # Universal English stop words — minimal set used across all search methods.

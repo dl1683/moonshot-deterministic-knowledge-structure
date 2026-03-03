@@ -7,12 +7,11 @@ dependencies.
 from __future__ import annotations
 import re
 import hashlib
-import math
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidTime, canonicalize_text
+from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidTime
 
 
 class Explorer:
