@@ -2846,3 +2846,61 @@ class TestDataExploration:
         result = p.compare_sources("paper_a.pdf", "nonexistent.pdf")
         text = p.render_comparison(result)
         assert "SOURCE COMPARISON" in text
+
+    # --- Corpus Insights ---
+
+    def test_insights_structure(self) -> None:
+        p = self._build_corpus()
+        result = p.insights()
+
+        assert "health_score" in result
+        assert "total_actions" in result
+        assert "actions" in result
+        assert "summary" in result
+        assert 0 <= result["health_score"] <= 100
+        assert result["summary"]["chunks"] == 10
+        assert result["summary"]["sources"] == 4
+
+    def test_insights_actions_are_valid(self) -> None:
+        p = self._build_corpus()
+        result = p.insights()
+
+        for action in result["actions"]:
+            assert "priority" in action
+            assert "category" in action
+            assert "action" in action
+            assert "detail" in action
+            assert action["priority"] in (1, 2)
+
+    def test_render_insights(self) -> None:
+        p = self._build_corpus()
+        text = p.render_insights()
+
+        assert "CORPUS INSIGHTS" in text
+        assert "Health:" in text
+
+    def test_insights_without_graph(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        p = Pipeline(store=store, search_index=search)
+        with pytest.raises(ValueError, match="Graph not built"):
+            p.insights()
+
+    def test_suggest_queries(self) -> None:
+        p = self._build_corpus()
+        suggestions = p.suggest_queries(n=5)
+
+        assert len(suggestions) > 0
+        for s in suggestions:
+            assert "query" in s
+            assert "rationale" in s
+            assert "type" in s
+            assert len(s["query"]) > 0
+
+    def test_suggest_queries_types(self) -> None:
+        p = self._build_corpus()
+        suggestions = p.suggest_queries(n=5)
+
+        types = {s["type"] for s in suggestions}
+        # Should have some variety
+        assert len(types) >= 1

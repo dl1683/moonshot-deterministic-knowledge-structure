@@ -2762,6 +2762,202 @@ class Pipeline:
 
         return "\n".join(lines)
 
+    # ---- Corpus Insights ----
+
+    def insights(self) -> dict[str, Any]:
+        """Generate proactive insights and recommendations for corpus improvement.
+
+        Combines quality report, staleness, contradiction scanning, and
+        corpus statistics into a prioritized list of actionable suggestions.
+
+        Returns:
+            Dict with prioritized actions, corpus health score, and suggestions.
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        actions: list[dict[str, Any]] = []
+
+        # 1. Quality issues
+        qr = self.quality_report()
+        for issue in qr["issues"]:
+            priority = 1 if issue["severity"] == "warning" else 2
+            actions.append({
+                "priority": priority,
+                "category": "quality",
+                "action": issue["suggestion"],
+                "detail": issue["description"],
+            })
+
+        # 2. Staleness
+        stale = self.staleness_report(age_days=365)
+        if stale["stale_count"] > 0:
+            pct = stale["stale_count"] / max(qr["summary"]["total_chunks"], 1) * 100
+            actions.append({
+                "priority": 2 if pct < 30 else 1,
+                "category": "freshness",
+                "action": f"Review {stale['stale_count']} stale chunks ({pct:.0f}% of corpus)",
+                "detail": f"Chunks older than 365 days across {len(stale['by_source'])} sources",
+            })
+
+        # 3. Source coverage gaps
+        sources = self.list_sources()
+        if len(sources) == 1:
+            actions.append({
+                "priority": 1,
+                "category": "coverage",
+                "action": "Add more sources for richer cross-referencing",
+                "detail": "Single-source corpus limits search and contradiction detection",
+            })
+        elif len(sources) >= 2:
+            biggest = sources[0]["chunks"]
+            total = sum(s["chunks"] for s in sources)
+            if biggest / total > 0.5:
+                actions.append({
+                    "priority": 2,
+                    "category": "balance",
+                    "action": f"Corpus dominated by '{sources[0]['source'][:40]}' ({biggest}/{total} chunks)",
+                    "detail": "Consider adding more sources on underrepresented topics",
+                })
+
+        # 4. Entity review suggestions
+        try:
+            review = self.review_entities(top_k=20)
+            if review["flagged"]:
+                actions.append({
+                    "priority": 2,
+                    "category": "entities",
+                    "action": f"Review {len(review['flagged'])} flagged entities for quality",
+                    "detail": "Use accept_entities/reject_entities to curate",
+                })
+        except Exception:
+            pass
+
+        # Sort by priority
+        actions.sort(key=lambda x: x["priority"])
+
+        # Health score (0-100)
+        warning_count = qr["summary"].get("warnings", 0)
+        health = max(0, 100 - warning_count * 15 - min(stale["stale_count"], 10) * 3)
+
+        return {
+            "health_score": health,
+            "total_actions": len(actions),
+            "actions": actions,
+            "summary": {
+                "chunks": qr["summary"]["total_chunks"],
+                "sources": qr["summary"]["total_sources"],
+                "clusters": qr["summary"]["total_clusters"],
+                "stale": stale["stale_count"],
+                "warnings": warning_count,
+            },
+        }
+
+    def suggest_queries(self, *, n: int = 5) -> list[dict[str, str]]:
+        """Suggest interesting queries to explore based on corpus content.
+
+        Analyzes cluster labels and source topics to generate query
+        suggestions that would exercise different parts of the knowledge base.
+
+        Args:
+            n: Number of suggestions to generate.
+
+        Returns:
+            List of dicts with query text and rationale.
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        suggestions: list[dict[str, str]] = []
+
+        # Get cluster labels
+        topics = self.topics()
+        top_clusters = sorted(topics, key=lambda x: -x["size"])
+
+        # 1. Suggest queries from largest clusters (what corpus is ABOUT)
+        for cluster in top_clusters[:min(2, len(top_clusters))]:
+            labels = cluster.get("labels", [])
+            if labels:
+                q = " ".join(labels[:3])
+                suggestions.append({
+                    "query": q,
+                    "rationale": f"Core topic ({cluster['size']} chunks)",
+                    "type": "exploratory",
+                })
+
+        # 2. Cross-cluster queries (bridge different topics)
+        if len(top_clusters) >= 2:
+            labels_a = top_clusters[0].get("labels", [])[:2]
+            labels_b = top_clusters[1].get("labels", [])[:2]
+            if labels_a and labels_b:
+                suggestions.append({
+                    "query": f"How does {' '.join(labels_a)} relate to {' '.join(labels_b)}?",
+                    "rationale": "Cross-topic bridge query",
+                    "type": "reasoning",
+                })
+
+        # 3. Contradiction-probing queries
+        if len(top_clusters) >= 1:
+            labels = top_clusters[0].get("labels", [])
+            if labels:
+                suggestions.append({
+                    "query": f"What are the debates about {labels[0]}?",
+                    "rationale": "Probe for contradictory claims",
+                    "type": "analytical",
+                })
+
+        # 4. Coverage gap query
+        sources = self.list_sources()
+        if sources:
+            smallest = sources[-1]
+            suggestions.append({
+                "query": f"What does {smallest['source'][:40]} cover?",
+                "rationale": f"Least-represented source ({smallest['chunks']} chunks)",
+                "type": "coverage",
+            })
+
+        return suggestions[:n]
+
+    def render_insights(self, result: dict[str, Any] | None = None) -> str:
+        """Render insights() output as human-readable text.
+
+        Args:
+            result: Output from insights(). If None, generates one.
+
+        Returns:
+            Formatted text string.
+        """
+        if result is None:
+            result = self.insights()
+
+        lines: list[str] = []
+        lines.append("=" * 60)
+        lines.append("  CORPUS INSIGHTS")
+        lines.append("=" * 60)
+
+        health = result["health_score"]
+        bar = "#" * (health // 5) + "-" * (20 - health // 5)
+        lines.append(f"  Health: [{bar}] {health}/100")
+
+        s = result["summary"]
+        lines.append(f"  {s['chunks']} chunks | {s['sources']} sources | {s['clusters']} clusters")
+        lines.append(f"  {s['stale']} stale | {s['warnings']} warnings")
+        lines.append("")
+
+        if result["actions"]:
+            lines.append("  RECOMMENDED ACTIONS:")
+            lines.append("-" * 60)
+            for i, action in enumerate(result["actions"], 1):
+                icon = "!!" if action["priority"] == 1 else ".."
+                lines.append(f"  {i}. [{icon}] [{action['category']}] {action['action']}")
+                lines.append(f"       {action['detail']}")
+            lines.append("")
+        else:
+            lines.append("  No actions needed — corpus looks healthy!")
+            lines.append("")
+
+        return "\n".join(lines)
+
     def link_entities(
         self,
         *,
