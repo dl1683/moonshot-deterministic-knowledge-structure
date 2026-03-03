@@ -3788,8 +3788,28 @@ class KnowledgeStore:
         if not candidates:
             return None
 
-        candidates.sort(key=KnowledgeStore._revision_winner_sort_key)
-        return candidates[0]
+        # Group by valid_time interval to prevent retraction splash (FM-009/INV-T5):
+        # a retraction of [2010,2020) must not suppress an asserted [2015,2025)
+        by_interval: Dict[tuple, list[ClaimRevision]] = {}
+        for c in candidates:
+            key = (c.valid_time.start, c.valid_time.end)
+            by_interval.setdefault(key, []).append(c)
+
+        # Within each interval, select the highest-precedence revision
+        interval_winners: list[ClaimRevision] = []
+        for group in by_interval.values():
+            group.sort(key=KnowledgeStore._revision_winner_sort_key)
+            interval_winners.append(group[0])
+
+        # Prefer asserted winners over retracted winners from other intervals
+        asserted = [w for w in interval_winners if w.status != "retracted"]
+        if asserted:
+            asserted.sort(key=KnowledgeStore._revision_winner_sort_key)
+            return asserted[0]
+
+        # All interval winners are retracted
+        interval_winners.sort(key=KnowledgeStore._revision_winner_sort_key)
+        return interval_winners[0]
 
     def query_as_of(
         self,
@@ -4866,6 +4886,107 @@ class KnowledgeStore:
 
             merged.relations[relation_id] = canonical_relation
             merged._pending_relations.pop(relation_id, None)
+
+        # Process pending relations from other (P1 fix: previously ignored)
+        for relation_id, incoming_relation in sorted(other._pending_relations.items()):
+            if relation_id in merged.relations or relation_id in merged._pending_relations:
+                # Already processed via active relations loop or already known
+                existing_relation = merged.relations.get(relation_id)
+                existing_pending = merged._pending_relations.get(relation_id)
+                is_known_identical = (
+                    existing_relation == incoming_relation
+                    or existing_pending == incoming_relation
+                )
+                if is_known_identical:
+                    continue
+
+            source_missing_endpoints = self._missing_relation_endpoints_from_index(
+                revision_ids=other.revisions,
+                incoming_relation=incoming_relation,
+            )
+            merged_missing_endpoints = self._missing_relation_endpoints(
+                merged=merged,
+                incoming_relation=incoming_relation,
+            )
+            missing_endpoints = tuple(
+                sorted(set(source_missing_endpoints).union(merged_missing_endpoints))
+            )
+            is_known_identical = (
+                merged.relations.get(relation_id) == incoming_relation
+                or merged._pending_relations.get(relation_id) == incoming_relation
+            )
+            if missing_endpoints and not is_known_identical:
+                conflicts.append(
+                    MergeConflict(
+                        code=ConflictCode.ORPHAN_RELATION_ENDPOINT,
+                        entity_id=relation_id,
+                        details=(
+                            "relation references missing revision endpoints: "
+                            + ", ".join(missing_endpoints)
+                        ),
+                    )
+                )
+
+            relation_variants = merged._relation_variants.setdefault(relation_id, {})
+            relation_collision_pairs = merged._relation_collision_pairs.setdefault(
+                relation_id, set()
+            )
+
+            existing_relation = merged.relations.get(relation_id)
+            existing_pending_relation = merged._pending_relations.get(relation_id)
+            if existing_relation is not None:
+                existing_relation_key = self._relation_payload_sort_key(existing_relation)
+                relation_variants.setdefault(existing_relation_key, existing_relation)
+            if existing_pending_relation is not None:
+                existing_pending_key = self._relation_payload_sort_key(existing_pending_relation)
+                relation_variants.setdefault(existing_pending_key, existing_pending_relation)
+
+            incoming_key = self._relation_payload_sort_key(incoming_relation)
+            for variant_key in sorted(tuple(relation_variants.keys())):
+                if variant_key == incoming_key:
+                    continue
+                pair_key = self._relation_collision_pair_key(variant_key, incoming_key)
+                if pair_key in relation_collision_pairs:
+                    continue
+                relation_collision_pairs.add(pair_key)
+                pair_signatures = tuple(
+                    self._relation_payload_signature(component_key)
+                    for component_key in pair_key
+                )
+                conflicts.append(
+                    MergeConflict(
+                        code=ConflictCode.RELATION_ID_COLLISION,
+                        entity_id=relation_id,
+                        details=(
+                            "incoming relation payload differs for same relation_id: "
+                            f"{pair_signatures[0]} vs {pair_signatures[1]}"
+                        ),
+                    )
+                )
+            relation_variants.setdefault(incoming_key, incoming_relation)
+
+            canonical_relation = relation_variants[min(relation_variants.keys())]
+            canonical_missing_endpoints = self._missing_relation_endpoints(
+                merged=merged,
+                incoming_relation=canonical_relation,
+            )
+            if canonical_missing_endpoints:
+                merged.relations.pop(relation_id, None)
+                merged._pending_relations[relation_id] = canonical_relation
+                continue
+
+            merged.relations[relation_id] = canonical_relation
+            merged._pending_relations.pop(relation_id, None)
+
+        # Merge variant/collision histories from other (P2/P3 fix: previously ignored)
+        for relation_id, other_variants in other._relation_variants.items():
+            merged_variants = merged._relation_variants.setdefault(relation_id, {})
+            for variant_key, variant_relation in other_variants.items():
+                merged_variants.setdefault(variant_key, variant_relation)
+        for relation_id, other_collision_pairs in other._relation_collision_pairs.items():
+            merged._relation_collision_pairs.setdefault(relation_id, set()).update(
+                other_collision_pairs
+            )
 
         self._promote_pending_relations(merged)
 
