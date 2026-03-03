@@ -31,6 +31,36 @@ from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidT
 from .index import CrossEncoderReranker, KnowledgeGraph, SearchIndex, SearchResult
 from .results import CoverageReport, DeepQueryResult, EvidenceChain, QueryFacet, ReasoningResult, SynthesisResult
 
+# Universal English stop words — minimal set used across all search methods.
+# Derived from function words (determiners, prepositions, auxiliaries, pronouns).
+# Domain-specific terms should NOT be here — those are handled by IDF filtering.
+_STOP_WORDS: frozenset[str] = frozenset({
+    # Determiners
+    "the", "a", "an", "this", "that", "these", "those",
+    # Prepositions
+    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "up", "about",
+    # Conjunctions
+    "and", "or", "but", "nor", "so", "if", "while", "than",
+    # Auxiliaries / modals
+    "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did",
+    "will", "would", "could", "should", "may", "might", "shall", "can",
+    # Pronouns
+    "it", "its", "they", "them", "their", "we", "our", "you", "your",
+    "he", "him", "his", "she", "her", "i", "me", "my",
+    # Question words
+    "what", "which", "who", "whom", "how", "why", "when", "where",
+    # Common adverbs / fillers
+    "not", "no", "also", "just", "very", "too", "only", "then",
+    "here", "there", "again", "further", "once", "each", "every",
+    "both", "few", "more", "most", "other", "some", "such", "own",
+    "same", "all", "any", "many", "much", "even", "still",
+    # Contractions fragments
+    "don", "didn", "doesn", "won", "ll", "ve", "re",
+})
+
 
 class SearchEngine:
     """Holds all search and reasoning methods.
@@ -2039,15 +2069,8 @@ class SearchEngine:
               - graph_distance: int | None (if graph exists)
         """
         # Extract terms
-        stop_words = {
-            "the", "a", "an", "is", "are", "was", "were", "be", "been",
-            "have", "has", "had", "do", "does", "did", "will", "would",
-            "to", "of", "in", "for", "on", "with", "at", "by", "from",
-            "as", "and", "or", "but", "not", "this", "that", "it", "its",
-        }
-
-        q_terms = set(re.findall(r'\b\w{3,}\b', question.lower())) - stop_words
-        r_terms = set(re.findall(r'\b\w{3,}\b', result.text.lower())) - stop_words
+        q_terms = set(re.findall(r'\b\w{3,}\b', question.lower())) - _STOP_WORDS
+        r_terms = set(re.findall(r'\b\w{3,}\b', result.text.lower())) - _STOP_WORDS
 
         matching = q_terms & r_terms
         q_unique = q_terms - r_terms
@@ -2131,17 +2154,8 @@ class SearchEngine:
             }
 
         # Extract question terms for scoring
-        stop_words = {
-            "the", "a", "an", "is", "are", "was", "were", "be", "been",
-            "have", "has", "had", "do", "does", "did", "will", "would",
-            "could", "should", "can", "may", "might", "to", "of", "in",
-            "for", "on", "with", "at", "by", "from", "as", "and", "or",
-            "but", "not", "this", "that", "it", "its", "what", "which",
-            "who", "how", "why", "when", "where", "if", "so", "than",
-            "about", "between", "into", "through", "during", "each",
-        }
         q_terms = [w for w in re.findall(r'\b\w{3,}\b', question.lower())
-                    if w not in stop_words]
+                    if w not in _STOP_WORDS]
         q_term_set = set(q_terms)
 
         # Collect all sentences for IDF computation
@@ -2168,7 +2182,7 @@ class SearchEngine:
         n_docs = len(all_sentences)
         doc_freq: dict[str, int] = {}
         for sent, _, _ in all_sentences:
-            s_terms = set(re.findall(r'\b\w{3,}\b', sent.lower())) - stop_words
+            s_terms = set(re.findall(r'\b\w{3,}\b', sent.lower())) - _STOP_WORDS
             for term in q_term_set & s_terms:
                 doc_freq[term] = doc_freq.get(term, 0) + 1
 
@@ -2182,7 +2196,7 @@ class SearchEngine:
 
         for sent, source, chunk_rank in all_sentences:
             s_words = re.findall(r'\b\w{3,}\b', sent.lower())
-            s_terms = set(s_words) - stop_words
+            s_terms = set(s_words) - _STOP_WORDS
             if not s_terms:
                 continue
 
@@ -2742,78 +2756,29 @@ class SearchEngine:
         max_terms: int = 10,
     ) -> list[str]:
         """Extract key terms from text using TF-IDF or simple frequency."""
-        # Common English stop words + newsletter/boilerplate terms
-        stop_words = {
-            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "will", "would", "could",
-            "should", "may", "might", "shall", "can", "need", "dare", "ought",
-            "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-            "as", "into", "through", "during", "before", "after", "above",
-            "below", "between", "out", "off", "over", "under", "again",
-            "further", "then", "once", "here", "there", "when", "where", "why",
-            "how", "all", "each", "every", "both", "few", "more", "most",
-            "other", "some", "such", "no", "nor", "not", "only", "own", "same",
-            "so", "than", "too", "very", "just", "because", "but", "and", "or",
-            "if", "while", "about", "up", "this", "that", "these", "those",
-            "it", "its", "they", "them", "their", "we", "our", "you", "your",
-            "he", "him", "his", "she", "her", "i", "me", "my", "what", "which",
-            "who", "whom", "also", "many", "much", "any", "well", "like",
-            "new", "one", "two", "first", "even", "back", "get", "make",
-            "know", "take", "come", "see", "think", "look", "want", "give",
-            "use", "find", "tell", "work", "way", "let", "still", "going",
-            "don", "didn", "doesn", "won", "ll", "ve", "re", "things",
-            # Newsletter/boilerplate terms
-            "hey", "subscribe", "newsletter", "email", "post", "writeup",
-            "write", "series", "breakdowns", "breakdown", "found", "value",
-            "sharing", "share", "appreciate", "link", "links", "click",
-            "follow", "join", "sign", "free", "update", "content", "read",
-            "reading", "check", "drop", "playlist", "search", "important",
-            "always", "people", "time", "really", "great", "amazing",
-            "incredible", "interesting", "awesome", "love", "thanks",
-            # Generic filler words
-            "huge", "believe", "becoming", "become", "thing", "things",
-            "look", "looking", "lot", "lots", "make", "making", "made",
-            "like", "keep", "still", "well", "much", "many", "also",
-            "way", "ways", "new", "use", "using", "used", "need",
-            "want", "say", "said", "means", "mean", "take", "step",
-            "move", "going", "come", "think", "know", "see", "get",
-            "let", "put", "run", "try", "give", "work", "call",
-            "long", "able", "different", "good", "best", "even",
-            "every", "first", "last", "next", "part", "point",
-            "right", "actually", "basically", "simply", "just",
-            "world", "today", "google", "source", "image",
-            # Commercial/marketing
-            "please", "consider", "premium", "subscription", "cost",
-            "netflix", "price", "pricing", "buy", "sell", "offer",
-            "product", "service", "customer", "company", "business",
-            "plan", "trial", "account", "million", "billion",
-            # Web/platform terms
-            "website", "page", "site", "online", "http", "https",
-            "www", "com", "org", "html", "pdf", "file", "files",
-            # Filler verbs/adjectives
+        # Use universal stop words plus additional common verbs/fillers
+        # that are not discriminative for key term extraction.
+        # NOTE: Domain-specific terms (ML, commercial, etc.) are intentionally
+        # NOT included here — IDF filtering should handle corpus-specific noise.
+        stop_words = _STOP_WORDS | {
+            # Common verbs that rarely carry domain meaning
+            "get", "make", "take", "come", "see", "think", "look", "want",
+            "give", "use", "find", "tell", "work", "let", "put", "run",
+            "try", "call", "say", "said", "know", "keep", "going", "need",
+            "like", "back", "way", "new", "one", "two", "first",
+            # Common filler adjectives/adverbs
+            "good", "best", "great", "long", "able", "different", "right",
+            "actually", "basically", "simply", "really", "well",
+            "last", "next", "part", "point", "thing", "things",
+            # Discourse connectives
+            "however", "therefore", "thus", "hence", "often",
+            "typically", "usually", "especially", "particularly", "because",
+            # Generic relational
             "based", "related", "specific", "general", "common",
-            "possible", "available", "similar", "across", "within",
-            "form", "answer", "question", "questions", "require",
-            "understand", "show", "shown", "shows", "mind",
-            "require", "required", "requires", "help", "helps",
-            "allows", "allow", "called", "known", "given",
+            "similar", "across", "within", "available", "possible",
+            "called", "known", "given", "shown", "required",
             "higher", "lower", "larger", "smaller", "better",
             "result", "results", "example", "examples", "case",
-            "however", "therefore", "thus", "hence", "often",
-            "typically", "usually", "especially", "particularly",
-            # Overly generic ML terms (appear in every chunk)
-            "data", "model", "models", "training", "learning",
-            "systems", "system", "code", "text", "input", "output",
-            "layers", "layer", "process", "method", "methods",
-            "approach", "task", "tasks", "problem", "problems",
-            "performance", "accuracy", "number", "set", "sets",
-            "features", "feature", "information", "function",
-            "network", "networks", "algorithm", "algorithms",
-            "parameters", "parameter", "weights", "weight",
-            # More commercial/filler
-            "provide", "various", "consulting", "advisory",
-            "services", "impact", "impacts", "batch", "sizes",
-            "crippling", "chocolate", "milk", "recipes",
         }
 
         # Extract words (3+ chars, alphabetic)
