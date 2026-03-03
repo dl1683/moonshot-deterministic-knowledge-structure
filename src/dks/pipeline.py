@@ -23,6 +23,7 @@ from .core import (
     Provenance,
     TransactionTime,
     ValidTime,
+    canonicalize_text,
 )
 from .extract import ExtractionResult, Extractor, PDFExtractor, TextChunker
 from .index import (
@@ -222,6 +223,77 @@ class Pipeline:
         # Track chunk siblings for context expansion
         source_name = Path(path).name
         self._chunk_siblings[source_name] = revision_ids
+
+        return revision_ids
+
+    def ingest_text(
+        self,
+        text: str,
+        *,
+        source: str = "text",
+        valid_time: ValidTime | None = None,
+        transaction_time: TransactionTime | None = None,
+        confidence_bp: int = 5000,
+        chunk_size: int = 800,
+        chunk_overlap: int = 150,
+    ) -> list[str]:
+        """Ingest raw text: chunk, commit, index. No PDF or extractor needed.
+
+        This is the simplest ingestion path for plain text content.
+
+        Args:
+            text: Raw text to ingest.
+            source: Source identifier for provenance.
+            valid_time: When the facts are true.
+            transaction_time: When ingested (auto-generated if None).
+            confidence_bp: Confidence for chunks.
+            chunk_size: Characters per chunk.
+            chunk_overlap: Overlap between chunks.
+
+        Returns:
+            List of revision_ids for committed chunks.
+        """
+        chunker = TextChunker(chunk_size=chunk_size, overlap=chunk_overlap, min_chunk=10)
+        chunks = chunker.chunk(text)
+
+        if not chunks:
+            # If chunker produces nothing (text too short), use raw text
+            if text.strip():
+                chunks = [text.strip()]
+            else:
+                return []
+
+        vt = valid_time or ValidTime(start=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        tt = transaction_time or self._next_tx()
+
+        revision_ids: list[str] = []
+        for i, chunk_text in enumerate(chunks):
+            core = ClaimCore(
+                claim_type="document.chunk@v1",
+                slots={
+                    "source": canonicalize_text(source),
+                    "chunk_idx": str(i),
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            prov = Provenance(source=source, evidence_ref=chunk_text)
+
+            revision = self.store.assert_revision(
+                core=core,
+                assertion=chunk_text,
+                valid_time=vt,
+                transaction_time=tt,
+                provenance=prov,
+                confidence_bp=confidence_bp,
+                status="asserted",
+            )
+            revision_ids.append(revision.revision_id)
+
+            if self._index is not None:
+                self._index.add(revision.revision_id, chunk_text)
+
+        # Track siblings for context expansion
+        self._chunk_siblings[source] = revision_ids
 
         return revision_ids
 

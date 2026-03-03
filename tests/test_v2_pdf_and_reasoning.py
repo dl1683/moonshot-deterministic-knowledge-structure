@@ -1342,3 +1342,81 @@ class TestPipelinePersistence:
             loaded = Pipeline.load(tmpdir)
             assert "doc" in loaded._chunk_siblings
             assert loaded._chunk_siblings["doc"] == rids
+
+
+# ---- Text Ingestion & Incremental Index Tests ----
+
+
+class TestTextIngestion:
+    """Test raw text ingestion and incremental indexing."""
+
+    def test_ingest_text_basic(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        rids = pipeline.ingest_text(
+            "Neural networks are powerful machine learning models. "
+            "They use backpropagation for training. "
+            "Deep learning has revolutionized AI research.",
+            source="notes.txt",
+        )
+        assert len(rids) >= 1
+        # Should be searchable
+        search.rebuild()
+        results = pipeline.query("neural networks backpropagation", k=3)
+        assert len(results) >= 1
+
+    def test_ingest_text_chunking(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        # Create text longer than chunk size
+        long_text = " ".join([f"Paragraph {i} about topic {i % 5}." * 20 for i in range(10)])
+        rids = pipeline.ingest_text(long_text, source="long_doc.txt", chunk_size=200)
+        assert len(rids) > 1  # Should produce multiple chunks
+
+    def test_ingest_text_tracks_siblings(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        rids = pipeline.ingest_text("A long text. " * 100, source="doc1.txt", chunk_size=100)
+        assert "doc1.txt" in pipeline._chunk_siblings
+        assert pipeline._chunk_siblings["doc1.txt"] == rids
+
+    def test_incremental_ingest(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        # First ingest
+        rids1 = pipeline.ingest_text("Transformers use attention mechanisms", source="paper1.txt")
+        search.rebuild()
+        results1 = pipeline.query("attention mechanisms", k=5)
+        count1 = len(results1)
+
+        # Second ingest (incremental)
+        rids2 = pipeline.ingest_text("BERT uses masked language modeling", source="paper2.txt")
+        search.rebuild()
+
+        # Should now find both
+        results_all = pipeline.query("transformers attention BERT language", k=10)
+        assert len(results_all) >= 2
+
+    def test_ingest_text_with_custom_times(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        rids = pipeline.ingest_text(
+            "Historical fact about ancient Rome",
+            source="history.txt",
+            valid_time=ValidTime(start=dt(2000), end=dt(2020)),
+            transaction_time=TransactionTime(tx_id=42, recorded_at=dt(2024)),
+        )
+        assert len(rids) >= 1
+        rev = store.revisions[rids[0]]
+        assert rev.transaction_time.tx_id == 42
+        assert rev.valid_time.end == dt(2020)

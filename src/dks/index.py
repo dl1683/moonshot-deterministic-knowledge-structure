@@ -643,17 +643,39 @@ class SentenceTransformerIndex:
         return embeddings.tolist()
 
     def add(self, revision_id: str, text: str) -> None:
-        """Add a document to the index."""
+        """Add a document to the index. Incrementally embeds if index exists."""
         self._texts.append(text)
         self._revision_ids.append(revision_id)
-        self._dirty = True
+
+        # If we already have embeddings, incrementally add the new one
+        if self._embeddings is not None and not self._dirty:
+            import numpy as np
+            new_emb = self._model.encode(
+                [text], normalize_embeddings=True,
+            )
+            self._embeddings = np.vstack([self._embeddings, new_emb])
+        else:
+            self._dirty = True
 
     def add_batch(self, items: list[tuple[str, str]]) -> None:
-        """Add multiple documents."""
+        """Add multiple documents. Incrementally embeds if index exists."""
+        new_texts = []
         for rid, text in items:
             self._texts.append(text)
             self._revision_ids.append(rid)
-        self._dirty = True
+            new_texts.append(text)
+
+        # If we already have embeddings, incrementally add the new batch
+        if self._embeddings is not None and not self._dirty and new_texts:
+            import numpy as np
+            new_embs = self._model.encode(
+                new_texts,
+                batch_size=self._batch_size,
+                normalize_embeddings=True,
+            )
+            self._embeddings = np.vstack([self._embeddings, new_embs])
+        else:
+            self._dirty = True
 
     def rebuild(self) -> None:
         """Rebuild the embedding matrix from all stored texts."""
