@@ -2576,6 +2576,7 @@ class KnowledgeStore:
         ] = {}
         self._revisions_by_core: Dict[str, set[str]] = {}
         self._merge_conflict_journal: tuple[tuple[int, MergeResult], ...] = ()
+        self._retracted_cache: Optional[set[str]] = None
 
     def retracted_core_ids(self) -> set[str]:
         """Return core_ids that have ANY retracted revision.
@@ -2583,9 +2584,19 @@ class KnowledgeStore:
         Retraction is permanent for a core_id: once a retraction revision
         exists, the core is considered tainted regardless of later assertions.
         To reassert a claim, create a NEW core with fresh content.
+
+        Results are cached and invalidated on assert_revision() calls.
         """
-        return {rev.core_id for rev in self.revisions.values()
-                if rev.status == "retracted"}
+        if self._retracted_cache is not None:
+            return self._retracted_cache
+        result = {rev.core_id for rev in self.revisions.values()
+                  if rev.status == "retracted"}
+        self._retracted_cache = result
+        return result
+
+    def _invalidate_retraction_cache(self) -> None:
+        """Invalidate the retracted_core_ids cache after store mutation."""
+        self._retracted_cache = None
 
     def checkpoint(self) -> "KnowledgeStore":
         snapshot = KnowledgeStore()
@@ -3777,6 +3788,7 @@ class KnowledgeStore:
 
         self.revisions[revision.revision_id] = revision
         self._revisions_by_core.setdefault(core.core_id, set()).add(revision.revision_id)
+        self._invalidate_retraction_cache()
         return revision
 
     def attach_relation(

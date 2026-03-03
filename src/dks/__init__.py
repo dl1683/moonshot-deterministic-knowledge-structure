@@ -79,7 +79,7 @@ from .pipeline import Pipeline
 from .mcp import MCPToolHandler
 
 __all__ = [
-    # V1 core (26 symbols — unchanged)
+    # V1 core (26 symbols)
     "ClaimCore",
     "ClaimRevision",
     "ConflictCode",
