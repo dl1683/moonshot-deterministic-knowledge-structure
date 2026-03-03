@@ -248,6 +248,24 @@ class MCPToolHandler:
                     "required": ["cluster_id"],
                 },
             },
+            {
+                "name": "dks_insights",
+                "description": "Get proactive corpus insights with prioritized improvement recommendations and health score.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "dks_suggest_queries",
+                "description": "Get suggested queries to explore the knowledge base based on corpus content.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "n": {"type": "integer", "description": "Number of suggestions", "default": 5},
+                    },
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -280,6 +298,8 @@ class MCPToolHandler:
             "dks_staleness": self._handle_staleness,
             "dks_delete_source": self._handle_delete_source,
             "dks_delete_cluster": self._handle_delete_cluster,
+            "dks_insights": self._handle_insights,
+            "dks_suggest_queries": self._handle_suggest_queries,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -481,6 +501,19 @@ class MCPToolHandler:
         reason = args.get("reason", "Deleted via MCP tool")
         try:
             return self._pipeline.delete_cluster(int(cluster_id), reason=reason)
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_insights(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._pipeline.insights()
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _handle_suggest_queries(self, args: dict[str, Any]) -> dict[str, Any]:
+        n = args.get("n", 5)
+        try:
+            return {"suggestions": self._pipeline.suggest_queries(n=n)}
         except ValueError as e:
             return {"error": str(e)}
 

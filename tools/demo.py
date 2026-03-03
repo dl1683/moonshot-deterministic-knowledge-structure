@@ -160,6 +160,22 @@ def run_demo(pipeline: Pipeline) -> None:
     else:
         print("  Need at least 2 sources for comparison.")
 
+    # ---- Section 8: Corpus Insights ----
+    print("\n" + "=" * 70)
+    print("  SECTION 8: CORPUS INSIGHTS")
+    print("=" * 70)
+    print(pipeline.render_insights())
+
+    # ---- Section 9: Suggested Queries ----
+    print("\n" + "=" * 70)
+    print("  SECTION 9: SUGGESTED QUERIES")
+    print("=" * 70)
+    suggestions = pipeline.suggest_queries(n=5)
+    for s in suggestions:
+        print(f"  [{s['type']:<12s}] {s['query']}")
+        print(f"    {s['rationale']}")
+    print()
+
     # ---- Summary ----
     print("\n" + "=" * 70)
     print("  SUMMARY")
@@ -200,6 +216,8 @@ def interactive_repl(pipeline: Pipeline) -> None:
     contradictions        Scan for contradictions
     staleness             Show staleness report
     entities              Review entity quality
+    insights              Corpus health + recommendations
+    suggest               Suggest interesting queries
     help                  Show this help
     quit                  Exit
 """)
@@ -348,6 +366,15 @@ def interactive_repl(pipeline: Pipeline) -> None:
                     print(f"\n  Flagged ({len(review['flagged'])}):")
                     for e in review["flagged"][:10]:
                         print(f"    {e['entity']:<30s} score={e['score']:.2f}")
+
+            elif cmd == "insights":
+                print(pipeline.render_insights())
+
+            elif cmd == "suggest":
+                suggestions = pipeline.suggest_queries(n=5)
+                for s in suggestions:
+                    print(f"  [{s['type']:<12s}] {s['query']}")
+                    print(f"    {s['rationale']}")
 
             else:
                 print(f"  Unknown command: {cmd}. Type 'help' for options.")

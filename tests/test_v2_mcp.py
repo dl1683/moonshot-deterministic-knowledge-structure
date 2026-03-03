@@ -39,7 +39,7 @@ class TestMCPToolListing:
     def test_list_tools_returns_tools(self) -> None:
         handler = _make_mcp_handler()
         tools = handler.list_tools()
-        assert len(tools) == 19
+        assert len(tools) == 21
 
         names = {t["name"] for t in tools}
         assert "dks_ingest" in names
