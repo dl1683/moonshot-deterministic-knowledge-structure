@@ -1,6 +1,7 @@
 """Tests for PDF extraction, TF-IDF search, and reasoning capabilities."""
 import os
 import tempfile
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2240,3 +2241,232 @@ class TestIntegration:
         stats = p.stats()
         assert stats["cores"] == 10  # 3+3+3+1 claims
         assert stats["revisions"] == 10
+
+
+class TestDataExploration:
+    """Tests for interactive data exploration features: profiling, entity review, cluster management."""
+
+    def _build_corpus(self) -> Pipeline:
+        """Build the standard test corpus with graph."""
+        from dks import Provenance, ClaimCore
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        claims_data = [
+            ("paper_a.pdf", [
+                "Neural networks require large amounts of labeled training data for supervised learning.",
+                "Convolutional neural networks are the dominant architecture for computer vision tasks.",
+                "Recurrent neural networks process sequences by maintaining hidden state across steps.",
+            ], 1, dt(2020)),
+            ("paper_b.pdf", [
+                "Transformers have replaced recurrent neural networks for sequence modeling tasks.",
+                "Vision transformers now match CNN performance on image classification benchmarks.",
+                "Large language models exhibit emergent capabilities including reasoning.",
+            ], 2, dt(2022)),
+            ("paper_c.pdf", [
+                "Large language models frequently hallucinate incorrect information during inference.",
+                "Models trained on internet data absorb societal biases present in the training corpus.",
+                "Current AI systems perform sophisticated pattern matching rather than true reasoning.",
+            ], 3, dt(2024)),
+            ("paper_d.pdf", [
+                "Recent studies show large language models do exhibit genuine reasoning capabilities.",
+            ], 4, dt(2024, 6)),
+        ]
+
+        for source, claims, tx_id, recorded in claims_data:
+            rev_ids = []
+            for i, text in enumerate(claims):
+                core = ClaimCore(
+                    claim_type="document.chunk@v1",
+                    slots={"source": source, "chunk_idx": str(i)},
+                )
+                rev = store.assert_revision(
+                    core=core, assertion=text,
+                    valid_time=ValidTime(start=recorded, end=None),
+                    transaction_time=TransactionTime(tx_id=tx_id, recorded_at=recorded),
+                    provenance=Provenance(source=source),
+                    confidence_bp=5000,
+                )
+                search.add(rev.revision_id, text)
+                rev_ids.append(rev.revision_id)
+            pipeline._chunk_siblings[source] = rev_ids
+
+        search.rebuild()
+        pipeline.build_graph(n_clusters=3)
+        return pipeline
+
+    # --- Corpus Profiling ---
+
+    def test_profile_returns_structure(self) -> None:
+        p = self._build_corpus()
+        prof = p.profile()
+
+        assert "summary" in prof
+        assert "clusters" in prof
+        assert "sources" in prof
+        assert "boilerplate" in prof
+        assert "quality_flags" in prof
+
+        # Summary checks
+        assert prof["summary"]["chunks"] == 10
+        assert prof["summary"]["sources"] == 4
+        assert prof["summary"]["clusters"] == 3
+
+    def test_profile_cluster_details(self) -> None:
+        p = self._build_corpus()
+        prof = p.profile()
+
+        for cluster in prof["clusters"]:
+            assert "cluster_id" in cluster
+            assert "size" in cluster
+            assert cluster["size"] > 0
+            assert "labels" in cluster
+            assert "source_count" in cluster
+            assert "samples" in cluster
+            assert "flags" in cluster
+
+    def test_profile_source_stats(self) -> None:
+        p = self._build_corpus()
+        prof = p.profile()
+
+        assert len(prof["sources"]) == 4
+        for src in prof["sources"]:
+            assert "source" in src
+            assert "chunks" in src
+            assert "clusters" in src
+            assert "fraction" in src
+            assert src["chunks"] > 0
+            assert 0 < src["fraction"] <= 1.0
+
+    def test_render_profile(self) -> None:
+        p = self._build_corpus()
+        text = p.render_profile()
+
+        assert "Corpus Profile" in text
+        assert "Chunks:" in text
+        assert "Sources:" in text
+        assert "Clusters:" in text
+
+    def test_profile_without_graph_raises(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        p = Pipeline(store=store, search_index=search)
+        with pytest.raises(ValueError, match="Graph not built"):
+            p.profile()
+
+    # --- Entity Review ---
+
+    def test_review_entities_structure(self) -> None:
+        p = self._build_corpus()
+        review = p.review_entities(top_k=10)
+
+        assert "high" in review
+        assert "medium" in review
+        assert "flagged" in review
+        assert "total_analyzed" in review
+        assert review["total_analyzed"] >= 0
+
+        for tier in ["high", "medium", "flagged"]:
+            for entry in review[tier]:
+                assert "entity" in entry
+                assert "frequency" in entry
+                assert "source_count" in entry
+                assert "cluster_count" in entry
+                assert "quality_score" in entry
+                assert 0 <= entry["quality_score"] <= 100
+
+    # --- Entity Accept/Reject ---
+
+    def test_accept_entities(self) -> None:
+        p = self._build_corpus()
+        count = p.accept_entities(["neural networks", "deep learning"])
+        assert count == 2
+
+        decisions = p.get_entity_decisions()
+        assert decisions["neural networks"] == "accepted"
+        assert decisions["deep learning"] == "accepted"
+
+    def test_reject_entities(self) -> None:
+        p = self._build_corpus()
+        count = p.reject_entities(["chocolate milk", "hey devansh"])
+        assert count == 2
+
+        decisions = p.get_entity_decisions()
+        assert decisions["chocolate milk"] == "rejected"
+        assert decisions["hey devansh"] == "rejected"
+
+    def test_rejected_entities_excluded_from_linking(self) -> None:
+        p = self._build_corpus()
+
+        # First link: should find entities
+        stats1 = p.link_entities(min_shared_entities=1)
+        entities1 = stats1["total_entities"]
+        assert entities1 > 0
+
+        # Find an entity that was discovered
+        top = stats1["top_entities"]
+        if top:
+            target_entity = top[0][0]
+            # Reject it
+            p.reject_entities([target_entity])
+            # Re-link: should have fewer entities
+            stats2 = p.link_entities(min_shared_entities=1)
+            assert stats2["total_entities"] < entities1
+
+    def test_entity_decisions_stored_as_claims(self) -> None:
+        p = self._build_corpus()
+        initial_cores = len(p.store.cores)
+        p.accept_entities(["test_entity"])
+        # Should have created a new core+revision
+        assert len(p.store.cores) == initial_cores + 1
+
+        # Verify claim type
+        for rid, rev in p.store.revisions.items():
+            core = p.store.cores.get(rev.core_id)
+            if core and core.claim_type == "dks.entity_review@v1":
+                assert core.slots["entity"] == "test_entity"
+                assert core.slots["decision"] == "accepted"
+                break
+        else:
+            pytest.fail("Entity review claim not found")
+
+    # --- Cluster Management ---
+
+    def test_delete_cluster(self) -> None:
+        p = self._build_corpus()
+        initial_revisions = len([
+            r for r in p.store.revisions.values()
+            if r.status == "asserted"
+        ])
+
+        # Find a cluster with members
+        clusters = p._graph._clusters
+        target_cid = next(iter(clusters))
+        target_size = len(clusters[target_cid])
+        assert target_size > 0
+
+        result = p.delete_cluster(target_cid)
+        assert result["retracted_count"] == target_size
+        assert len(result["affected_sources"]) > 0
+
+        # Verify retraction revisions were created (bitemporal: originals stay,
+        # new retracted revisions are added)
+        retracted_revs = [
+            r for r in p.store.revisions.values()
+            if r.status == "retracted"
+        ]
+        assert len(retracted_revs) == target_size
+
+    def test_delete_empty_cluster(self) -> None:
+        p = self._build_corpus()
+        result = p.delete_cluster(9999)  # Non-existent cluster
+        assert result["retracted_count"] == 0
+
+    def test_delete_cluster_removes_from_graph(self) -> None:
+        p = self._build_corpus()
+        clusters = p._graph._clusters
+        target_cid = next(iter(clusters))
+
+        p.delete_cluster(target_cid)
+        assert target_cid not in p._graph._clusters

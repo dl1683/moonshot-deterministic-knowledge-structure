@@ -1137,6 +1137,514 @@ class Pipeline:
                 ))
         return results
 
+    # ---- Data Exploration & Interactive Review ----
+
+    def profile(self) -> dict[str, Any]:
+        """Generate a comprehensive corpus profile for interactive exploration.
+
+        Returns a structured overview of the corpus that lets users understand
+        their data: what topics exist, how sources distribute, where potential
+        quality issues are, and what entities were discovered.
+
+        Must be called AFTER build_graph().
+
+        Returns:
+            Dict with:
+              - summary: basic stats (chunks, sources, clusters, edges)
+              - clusters: list of cluster profiles (id, size, labels, sources, samples)
+              - sources: per-source stats (chunk count, clusters covered, topics)
+              - boilerplate: detected boilerplate patterns and their frequency
+              - quality_flags: list of potential quality issues detected
+        """
+        import re
+        import hashlib
+        from collections import Counter
+
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        n_chunks = len(self.store.revisions)
+        rev_to_cluster = getattr(self._graph, '_revision_cluster', {})
+
+        # ---- Source analysis ----
+        source_chunks: dict[str, list[str]] = {}  # source -> [revision_ids]
+        source_clusters: dict[str, set[int]] = {}  # source -> {cluster_ids}
+        for rid, rev in self.store.revisions.items():
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+            source_chunks.setdefault(source, []).append(rid)
+            cid = rev_to_cluster.get(rid)
+            if cid is not None:
+                source_clusters.setdefault(source, set()).add(cid)
+
+        n_sources = len(source_chunks)
+
+        # ---- Cluster profiles ----
+        cluster_profiles = []
+        clusters = getattr(self._graph, '_clusters', {})
+        cluster_labels = getattr(self._graph, '_cluster_labels', {})
+
+        for cid, members in sorted(clusters.items()):
+            # Source distribution within this cluster
+            cluster_sources: Counter = Counter()
+            for rid in members:
+                core = self.store.cores.get(
+                    self.store.revisions[rid].core_id
+                ) if rid in self.store.revisions else None
+                source = core.slots.get("source", "?") if core else "?"
+                cluster_sources[source] += 1
+
+            # Sample chunks (first 3)
+            samples = []
+            for rid in members[:3]:
+                rev = self.store.revisions.get(rid)
+                if rev:
+                    samples.append({
+                        "revision_id": rid,
+                        "text": rev.assertion[:200],
+                    })
+
+            # Quality flags for this cluster
+            flags = []
+            if len(cluster_sources) == 1:
+                flags.append("single_source")
+            dominant_source, dominant_count = cluster_sources.most_common(1)[0]
+            if dominant_count / max(len(members), 1) > 0.8:
+                flags.append(f"dominated_by:{dominant_source[:30]}")
+
+            cluster_profiles.append({
+                "cluster_id": cid,
+                "size": len(members),
+                "labels": cluster_labels.get(cid, [])[:6],
+                "source_count": len(cluster_sources),
+                "top_sources": cluster_sources.most_common(3),
+                "samples": samples,
+                "flags": flags,
+            })
+
+        # Sort by size descending
+        cluster_profiles.sort(key=lambda c: -c["size"])
+
+        # ---- Boilerplate detection ----
+        sentence_doc_freq: Counter = Counter()
+        sentence_text: dict[str, str] = {}  # hash -> sentence text
+        for rid, rev in self.store.revisions.items():
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", rid) if core else rid
+            sentences = re.split(r'(?<=[.!?])\s+|\n+', rev.assertion)
+            seen_hashes: set[str] = set()
+            for sent in sentences:
+                normed = re.sub(r'\s+', ' ', sent.strip())
+                if len(normed) < 20:
+                    continue
+                h = hashlib.md5(normed.lower().encode()).hexdigest()[:16]
+                if h not in seen_hashes:
+                    seen_hashes.add(h)
+                    sentence_doc_freq[h] += 1
+                    if h not in sentence_text:
+                        sentence_text[h] = normed[:120]
+
+        # Top repeated sentences (likely boilerplate)
+        boilerplate_candidates = [
+            {"text": sentence_text[h], "frequency": freq, "hash": h}
+            for h, freq in sentence_doc_freq.most_common(20)
+            if freq >= max(3, n_sources // 10)
+        ]
+
+        # ---- Quality flags ----
+        quality_flags = []
+        if n_sources < 3:
+            quality_flags.append({
+                "type": "low_source_diversity",
+                "message": f"Only {n_sources} source documents. Cross-document linking may be limited.",
+            })
+
+        # Check for source dominance
+        source_sizes = [(s, len(rids)) for s, rids in source_chunks.items()]
+        source_sizes.sort(key=lambda x: -x[1])
+        if source_sizes:
+            top_source, top_count = source_sizes[0]
+            if top_count / max(n_chunks, 1) > 0.3:
+                quality_flags.append({
+                    "type": "source_dominance",
+                    "message": f"Source '{top_source[:40]}' contains {top_count}/{n_chunks} chunks ({top_count*100//n_chunks}%). Consider balancing.",
+                })
+
+        # Check for boilerplate prevalence
+        if len(boilerplate_candidates) > 5:
+            total_bp_freq = sum(b["frequency"] for b in boilerplate_candidates)
+            quality_flags.append({
+                "type": "high_boilerplate",
+                "message": f"{len(boilerplate_candidates)} repeated sentences detected (total {total_bp_freq} occurrences). Consider reviewing.",
+            })
+
+        # Check for single-source clusters
+        single_source_clusters = sum(1 for c in cluster_profiles if "single_source" in c["flags"])
+        if single_source_clusters > len(cluster_profiles) // 3:
+            quality_flags.append({
+                "type": "isolated_clusters",
+                "message": f"{single_source_clusters}/{len(cluster_profiles)} clusters have content from a single source.",
+            })
+
+        # ---- Source stats ----
+        source_stats = []
+        for source, rids in sorted(source_chunks.items(), key=lambda x: -len(x[1])):
+            source_stats.append({
+                "source": source,
+                "chunks": len(rids),
+                "clusters": len(source_clusters.get(source, set())),
+                "fraction": len(rids) / max(n_chunks, 1),
+            })
+
+        return {
+            "summary": {
+                "chunks": n_chunks,
+                "sources": n_sources,
+                "clusters": len(clusters),
+                "edges": sum(len(adj) for adj in self._graph._adjacency.values()),
+            },
+            "clusters": cluster_profiles,
+            "sources": source_stats[:20],  # Top 20 sources
+            "boilerplate": boilerplate_candidates,
+            "quality_flags": quality_flags,
+        }
+
+    def render_profile(self, profile: dict[str, Any] | None = None) -> str:
+        """Render a corpus profile as readable text.
+
+        Args:
+            profile: Output from profile(). If None, calls profile().
+
+        Returns:
+            Formatted text summary.
+        """
+        if profile is None:
+            profile = self.profile()
+
+        lines: list[str] = []
+        s = profile["summary"]
+        lines.append(f"=== Corpus Profile ===")
+        lines.append(f"Chunks: {s['chunks']:,}  |  Sources: {s['sources']}  |  "
+                     f"Clusters: {s['clusters']}  |  Edges: {s['edges']:,}")
+
+        # Quality flags
+        flags = profile.get("quality_flags", [])
+        if flags:
+            lines.append(f"\n--- Quality Flags ({len(flags)}) ---")
+            for f in flags:
+                lines.append(f"  [{f['type']}] {f['message']}")
+
+        # Top clusters
+        lines.append(f"\n--- Top Clusters ---")
+        for c in profile["clusters"][:10]:
+            labels = ", ".join(c["labels"][:4])
+            flags_str = f"  [{', '.join(c['flags'])}]" if c["flags"] else ""
+            lines.append(f"  Cluster {c['cluster_id']}: {c['size']} chunks, "
+                        f"{c['source_count']} sources  |  {labels}{flags_str}")
+
+        # Top sources
+        lines.append(f"\n--- Top Sources ---")
+        for src in profile["sources"][:10]:
+            lines.append(f"  {src['source'][:50]:50s}  {src['chunks']:4d} chunks  "
+                        f"{src['clusters']:2d} clusters  ({src['fraction']*100:.1f}%)")
+
+        # Boilerplate
+        bp = profile.get("boilerplate", [])
+        if bp:
+            lines.append(f"\n--- Detected Boilerplate ({len(bp)} patterns) ---")
+            for b in bp[:5]:
+                lines.append(f"  [{b['frequency']}x] {b['text'][:80]}...")
+
+        return "\n".join(lines)
+
+    def delete_cluster(
+        self,
+        cluster_id: int,
+        *,
+        reason: str = "User deleted cluster via interactive review",
+    ) -> dict[str, Any]:
+        """Delete all chunks in a cluster by retracting their revisions.
+
+        This is a soft delete — the data remains in the store as retracted
+        revisions, preserving the full audit trail. The chunks will no longer
+        appear in search results or entity linking.
+
+        Args:
+            cluster_id: The cluster to delete.
+            reason: Reason for deletion (stored in retraction metadata).
+
+        Returns:
+            Dict with retracted_count and affected_sources.
+        """
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        clusters = getattr(self._graph, '_clusters', {})
+        members = clusters.get(cluster_id, [])
+        if not members:
+            return {"retracted_count": 0, "affected_sources": []}
+
+        # Retract each revision in the cluster
+        retracted = 0
+        affected_sources: set[str] = set()
+        tx_time = self._next_tx()
+
+        from .core import Provenance as _P
+
+        for rid in members:
+            rev = self.store.revisions.get(rid)
+            if rev and rev.status == "asserted":
+                core = self.store.cores.get(rev.core_id)
+                source = core.slots.get("source", "?") if core else "?"
+                affected_sources.add(source)
+
+                self.store.assert_revision(
+                    core=core,
+                    assertion=rev.assertion,
+                    valid_time=rev.valid_time,
+                    transaction_time=tx_time,
+                    provenance=_P(source="cluster_delete", evidence_ref=reason),
+                    confidence_bp=rev.confidence_bp,
+                    status="retracted",
+                )
+                retracted += 1
+
+        # Remove from graph
+        for rid in members:
+            self._graph._adjacency.pop(rid, None)
+        clusters.pop(cluster_id, None)
+        rev_cluster = getattr(self._graph, '_revision_cluster', {})
+        for rid in members:
+            rev_cluster.pop(rid, None)
+
+        return {
+            "retracted_count": retracted,
+            "affected_sources": sorted(affected_sources),
+            "reason": reason,
+        }
+
+    def review_entities(
+        self,
+        *,
+        top_k: int = 50,
+    ) -> dict[str, Any]:
+        """Analyze entities for interactive review.
+
+        Runs entity extraction (same method as link_entities) and categorizes
+        entities into quality tiers based on source diversity and cluster spread:
+        - high: appears across many sources and clusters (likely real domain term)
+        - medium: moderate spread, may need review
+        - flagged: concentrated in few sources or clusters (likely boilerplate)
+
+        Must be called AFTER build_graph().
+
+        Args:
+            top_k: Number of top entities to analyze.
+
+        Returns:
+            Dict with high/medium/flagged entity lists, each entry containing
+            the entity text, frequency, source count, cluster count, and
+            a quality_score (0-100).
+        """
+        import math
+
+        if not hasattr(self, "_graph") or self._graph is None:
+            raise ValueError("Graph not built. Call build_graph() first.")
+
+        # Run link_entities to get the statistically-filtered entities
+        link_result = self.link_entities(min_shared_entities=1)
+        top_entities = link_result.get("top_entities", [])
+
+        rev_to_cluster = getattr(self._graph, '_revision_cluster', {})
+        n_chunks = len(self.store.revisions)
+
+        # Compute total sources
+        all_sources: set[str] = set()
+        for rid, rev in self.store.revisions.items():
+            core = self.store.cores.get(rev.core_id)
+            source = core.slots.get("source", "?") if core else "?"
+            all_sources.add(source)
+        n_sources_total = len(all_sources)
+        n_clusters_total = len(set(rev_to_cluster.values())) if rev_to_cluster else 1
+
+        # For each top entity, compute quality metrics
+        import re
+        word_re = re.compile(r'\b([a-z]{3,})\b')
+
+        # Build entity -> revisions map using same approach as link_entities
+        entity_revisions: dict[str, set[str]] = {}
+        for rid, rev in self.store.revisions.items():
+            tokens = word_re.findall(rev.assertion.lower())
+            for i in range(len(tokens) - 1):
+                bg = f"{tokens[i]} {tokens[i+1]}"
+                entity_revisions.setdefault(bg, set()).add(rid)
+            for t in set(tokens):
+                entity_revisions.setdefault(t, set()).add(rid)
+
+        entities_analyzed = []
+        for entity, freq in top_entities[:top_k]:
+            rids = entity_revisions.get(entity, set())
+
+            # Source and cluster diversity
+            sources: set[str] = set()
+            clusters: set[int] = set()
+            for rid in rids:
+                rev = self.store.revisions.get(rid)
+                if rev:
+                    core = self.store.cores.get(rev.core_id)
+                    source = core.slots.get("source", "?") if core else "?"
+                    sources.add(source)
+                cid = rev_to_cluster.get(rid)
+                if cid is not None:
+                    clusters.add(cid)
+
+            # Quality score (0-100):
+            # Source diversity (0-40): % of total sources containing entity
+            source_frac = len(sources) / max(n_sources_total, 1)
+            source_score = min(40, int(40 * min(source_frac / 0.05, 1)))
+
+            # Cluster diversity (0-40): % of total clusters containing entity
+            cluster_frac = len(clusters) / max(n_clusters_total, 1)
+            cluster_score = min(40, int(40 * min(cluster_frac / 0.1, 1)))
+
+            # Frequency (0-20): moderate frequency is optimal (~0.5-3% of corpus)
+            freq_ratio = len(rids) / max(n_chunks, 1)
+            if freq_ratio < 0.002:
+                freq_score = 10
+            elif freq_ratio <= 0.03:
+                freq_score = 20  # Sweet spot
+            elif freq_ratio <= 0.05:
+                freq_score = 10
+            elif freq_ratio <= 0.10:
+                freq_score = 0
+            else:
+                freq_score = -20  # Very ubiquitous = penalty
+
+            quality = source_score + cluster_score + freq_score
+
+            entities_analyzed.append({
+                "entity": entity,
+                "frequency": freq,
+                "source_count": len(sources),
+                "cluster_count": len(clusters),
+                "quality_score": quality,
+            })
+
+        # Categorize
+        high = [e for e in entities_analyzed if e["quality_score"] >= 60]
+        medium = [e for e in entities_analyzed if 30 <= e["quality_score"] < 60]
+        flagged = [e for e in entities_analyzed if e["quality_score"] < 30]
+
+        return {
+            "high": high,
+            "medium": medium,
+            "flagged": flagged,
+            "total_analyzed": len(entities_analyzed),
+        }
+
+    def accept_entities(
+        self,
+        entities: list[str],
+        *,
+        reason: str = "User accepted via interactive review",
+    ) -> int:
+        """Accept entities as valid domain terms.
+
+        Stores acceptance decisions as claims in the KnowledgeStore,
+        making them persistent and auditable.
+
+        Args:
+            entities: List of entity strings to accept.
+            reason: Reason for acceptance.
+
+        Returns:
+            Number of entity decisions stored.
+        """
+        from .core import ClaimCore as _CC, Provenance as _P
+        from .core import ValidTime as _VT
+        from datetime import datetime as _dt
+
+        now = _dt.now()
+        tx = self._next_tx()
+        count = 0
+
+        for entity in entities:
+            core = _CC(
+                claim_type="dks.entity_review@v1",
+                slots={"entity": entity, "decision": "accepted"},
+            )
+            self.store.assert_revision(
+                core=core,
+                assertion=f"Entity '{entity}' accepted: {reason}",
+                valid_time=_VT(start=now, end=None),
+                transaction_time=tx,
+                provenance=_P(source="interactive_review"),
+                confidence_bp=9000,
+            )
+            count += 1
+
+        return count
+
+    def reject_entities(
+        self,
+        entities: list[str],
+        *,
+        reason: str = "User rejected via interactive review",
+    ) -> int:
+        """Reject entities as noise/boilerplate.
+
+        Stores rejection decisions as claims in the KnowledgeStore,
+        making them persistent and auditable. Rejected entities will
+        be excluded from future entity linking.
+
+        Args:
+            entities: List of entity strings to reject.
+            reason: Reason for rejection.
+
+        Returns:
+            Number of entity decisions stored.
+        """
+        from .core import ClaimCore as _CC, Provenance as _P
+        from .core import ValidTime as _VT
+        from datetime import datetime as _dt
+
+        now = _dt.now()
+        tx = self._next_tx()
+        count = 0
+
+        for entity in entities:
+            core = _CC(
+                claim_type="dks.entity_review@v1",
+                slots={"entity": entity, "decision": "rejected"},
+            )
+            self.store.assert_revision(
+                core=core,
+                assertion=f"Entity '{entity}' rejected: {reason}",
+                valid_time=_VT(start=now, end=None),
+                transaction_time=tx,
+                provenance=_P(source="interactive_review"),
+                confidence_bp=9000,
+            )
+            count += 1
+
+        return count
+
+    def get_entity_decisions(self) -> dict[str, str]:
+        """Retrieve all entity review decisions.
+
+        Returns:
+            Dict mapping entity -> "accepted" or "rejected".
+        """
+        decisions: dict[str, str] = {}
+        for rid, rev in self.store.revisions.items():
+            core = self.store.cores.get(rev.core_id)
+            if core and core.claim_type == "dks.entity_review@v1":
+                entity = core.slots.get("entity", "")
+                decision = core.slots.get("decision", "")
+                if entity and decision:
+                    decisions[entity] = decision
+        return decisions
+
     def link_entities(
         self,
         *,
@@ -1442,6 +1950,17 @@ class Pipeline:
                     e for e in chunk_entities[rev_id]
                     if e in entity_chunks
                 }
+
+        # Pass 5: Apply user entity decisions (reject list)
+        decisions = self.get_entity_decisions()
+        rejected = {e for e, d in decisions.items() if d == "rejected"}
+        if rejected:
+            for rev_id in chunk_entities:
+                chunk_entities[rev_id] -= rejected
+            entity_chunks = {
+                e: rids for e, rids in entity_chunks.items()
+                if e not in rejected
+            }
 
         # Step 2: Find cross-document entity links
         # For each pair of chunks from different sources, count shared entities
