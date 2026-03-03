@@ -1792,6 +1792,119 @@ class Pipeline:
             total_chunks=len(expanded),
         )
 
+    # ---- Knowledge Timeline ----
+
+    def timeline(
+        self,
+        topic: str,
+        *,
+        k: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Show how knowledge about a topic evolved over time.
+
+        Returns a chronological view of claims related to a topic, ordered
+        by transaction time (when the knowledge was recorded). This enables
+        questions like "how has our understanding of X changed?"
+
+        Args:
+            topic: Topic to trace through time.
+            k: Maximum chunks to analyze.
+
+        Returns:
+            List of timeline entries, each with:
+              - revision_id: str
+              - text: str (chunk content)
+              - source: str
+              - recorded_at: str (ISO timestamp)
+              - tx_id: int
+              - valid_from: str (ISO timestamp)
+              - valid_until: str | None
+              - status: str ("asserted" or "retracted")
+              - score: float (relevance to topic)
+        """
+        if self._index is None:
+            raise ValueError("No search index configured.")
+
+        results = self.query(topic, k=k)
+
+        entries: list[dict[str, Any]] = []
+        for r in results:
+            rev = self.store.revisions.get(r.revision_id)
+            if rev is None:
+                continue
+
+            core = self.store.cores.get(r.core_id)
+            source = core.slots.get("source", "unknown") if core else "unknown"
+
+            entries.append({
+                "revision_id": r.revision_id,
+                "text": r.text[:500],
+                "source": source,
+                "recorded_at": rev.transaction_time.recorded_at.isoformat(),
+                "tx_id": rev.transaction_time.tx_id,
+                "valid_from": rev.valid_time.start.isoformat(),
+                "valid_until": rev.valid_time.end.isoformat() if rev.valid_time.end else None,
+                "status": rev.status,
+                "score": r.score,
+            })
+
+        # Sort chronologically by transaction time
+        entries.sort(key=lambda e: e["recorded_at"])
+        return entries
+
+    def timeline_diff(
+        self,
+        topic: str,
+        *,
+        tx_id_a: int,
+        tx_id_b: int,
+        k: int = 20,
+    ) -> dict[str, Any]:
+        """Compare what was known about a topic at two different points in time.
+
+        Returns chunks that appear in one time but not the other, enabling
+        "what changed between version A and version B?" analysis.
+
+        Args:
+            topic: Topic to compare.
+            tx_id_a: Earlier transaction time.
+            tx_id_b: Later transaction time.
+            k: Maximum chunks per query.
+
+        Returns:
+            Dict with:
+              - only_in_a: chunks visible at tx_id_a but not tx_id_b
+              - only_in_b: chunks visible at tx_id_b but not tx_id_a
+              - in_both: chunks visible at both times
+              - summary: human-readable diff summary
+        """
+        if self._index is None:
+            raise ValueError("No search index configured.")
+
+        far_future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        results_a = self.query(topic, k=k, valid_at=far_future, tx_id=tx_id_a)
+        results_b = self.query(topic, k=k, valid_at=far_future, tx_id=tx_id_b)
+
+        ids_a = {r.revision_id for r in results_a}
+        ids_b = {r.revision_id for r in results_b}
+
+        only_a = [r for r in results_a if r.revision_id not in ids_b]
+        only_b = [r for r in results_b if r.revision_id not in ids_a]
+        both = [r for r in results_b if r.revision_id in ids_a]
+
+        summary_parts = [f"Topic: {topic}"]
+        summary_parts.append(f"At tx_id={tx_id_a}: {len(results_a)} chunks")
+        summary_parts.append(f"At tx_id={tx_id_b}: {len(results_b)} chunks")
+        summary_parts.append(f"Added: {len(only_b)}, Removed: {len(only_a)}, Unchanged: {len(both)}")
+
+        return {
+            "only_in_a": only_a,
+            "only_in_b": only_b,
+            "in_both": both,
+            "summary": " | ".join(summary_parts),
+        }
+
     # ---- Provenance & Citation ----
 
     def provenance_of(self, result: SearchResult) -> dict[str, Any]:
@@ -2016,6 +2129,175 @@ class Pipeline:
             })
 
         return result
+
+    # ---- Semantic Deduplication ----
+
+    def deduplicate(
+        self,
+        *,
+        threshold: float = 0.85,
+        k: int = 100,
+    ) -> list[list[SearchResult]]:
+        """Find clusters of near-duplicate chunks across documents.
+
+        Uses TF-IDF pairwise similarity to identify chunks that say
+        essentially the same thing. Useful for corpus quality analysis.
+
+        Args:
+            threshold: Minimum similarity to consider as duplicate (0-1).
+            k: Maximum chunks to analyze. Set high for full corpus scan.
+
+        Returns:
+            List of duplicate clusters (each cluster is a list of SearchResult).
+            Only returns clusters with 2+ members.
+        """
+        tfidf = None
+        if isinstance(self._index, TfidfSearchIndex):
+            tfidf = self._index._tfidf
+        elif isinstance(self._index, HybridSearchIndex):
+            tfidf = self._index._tfidf
+
+        if tfidf is None or not tfidf._fitted:
+            return []
+
+        try:
+            from sklearn.metrics.pairwise import cosine_similarity
+        except ImportError:
+            return []
+
+        # Use the full TF-IDF matrix
+        n = min(len(tfidf._texts), k)
+        if n < 2:
+            return []
+
+        sim_matrix = cosine_similarity(tfidf._matrix[:n])
+
+        # Union-find for clustering
+        parent: dict[int, int] = {i: i for i in range(n)}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(x: int, y: int) -> None:
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if float(sim_matrix[i][j]) >= threshold:
+                    union(i, j)
+
+        # Group by cluster
+        clusters: dict[int, list[int]] = {}
+        for i in range(n):
+            root = find(i)
+            clusters.setdefault(root, []).append(i)
+
+        # Build results — only clusters with 2+ members
+        result: list[list[SearchResult]] = []
+        for members in clusters.values():
+            if len(members) < 2:
+                continue
+            cluster_results = []
+            for idx in members:
+                rid = tfidf._revision_ids[idx]
+                rev = self.store.revisions.get(rid)
+                if rev:
+                    cluster_results.append(SearchResult(
+                        core_id=rev.core_id,
+                        revision_id=rid,
+                        score=1.0,
+                        text=tfidf._texts[idx],
+                    ))
+            if len(cluster_results) >= 2:
+                result.append(cluster_results)
+
+        # Sort by cluster size (largest first)
+        result.sort(key=lambda c: -len(c))
+        return result
+
+    # ---- Query Explanation ----
+
+    def explain(
+        self,
+        question: str,
+        result: SearchResult,
+    ) -> dict[str, Any]:
+        """Explain why a specific result was returned for a question.
+
+        Provides feature attribution showing which terms matched,
+        the similarity score breakdown, and contextual factors.
+
+        Args:
+            question: The original query.
+            result: A SearchResult to explain.
+
+        Returns:
+            Dict with:
+              - question: str
+              - result_text: str (first 200 chars)
+              - score: float
+              - matching_terms: list[str] (shared terms)
+              - question_unique_terms: list[str]
+              - result_unique_terms: list[str]
+              - term_overlap_ratio: float
+              - source: str
+              - provenance: dict
+              - graph_distance: int | None (if graph exists)
+        """
+        import re
+
+        # Extract terms
+        stop_words = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "have", "has", "had", "do", "does", "did", "will", "would",
+            "to", "of", "in", "for", "on", "with", "at", "by", "from",
+            "as", "and", "or", "but", "not", "this", "that", "it", "its",
+        }
+
+        q_terms = set(re.findall(r'\b\w{3,}\b', question.lower())) - stop_words
+        r_terms = set(re.findall(r'\b\w{3,}\b', result.text.lower())) - stop_words
+
+        matching = q_terms & r_terms
+        q_unique = q_terms - r_terms
+        r_unique = r_terms - q_terms
+
+        overlap_ratio = len(matching) / max(len(q_terms), 1)
+
+        # Provenance
+        prov = self.provenance_of(result)
+
+        # Graph distance
+        graph_distance = None
+        if hasattr(self, "_graph") and self._graph is not None:
+            # Try to find the shortest path from any query result to this result
+            query_results = self.query(question, k=3)
+            for qr in query_results:
+                if qr.revision_id == result.revision_id:
+                    graph_distance = 0
+                    break
+                path = self._graph.path(qr.revision_id, result.revision_id)
+                if path is not None:
+                    d = len(path) - 1
+                    if graph_distance is None or d < graph_distance:
+                        graph_distance = d
+
+        return {
+            "question": question,
+            "result_text": result.text[:200],
+            "score": result.score,
+            "matching_terms": sorted(matching),
+            "question_unique_terms": sorted(q_unique),
+            "result_unique_terms": sorted(r_unique)[:20],
+            "term_overlap_ratio": round(overlap_ratio, 3),
+            "source": prov.get("document", prov.get("source", "unknown")),
+            "provenance": prov,
+            "graph_distance": graph_distance,
+        }
 
     # ---- Contradiction Detection ----
 

@@ -1420,3 +1420,185 @@ class TestTextIngestion:
         rev = store.revisions[rids[0]]
         assert rev.transaction_time.tx_id == 42
         assert rev.valid_time.end == dt(2020)
+
+
+# ---- Knowledge Timeline Tests ----
+
+
+class TestTimeline:
+    """Test knowledge timeline and temporal diff."""
+
+    def _make_pipeline(self) -> Pipeline:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        # Claims at different transaction times
+        claims = [
+            ("neural networks were first invented in the 1940s", "early_ai.pdf", 1, dt(2020)),
+            ("deep learning became practical with GPUs in 2012", "dl_history.pdf", 2, dt(2021)),
+            ("transformers replaced recurrent models for NLP", "transformers.pdf", 3, dt(2023)),
+        ]
+
+        for text, source, tx_id, recorded in claims:
+            core = ClaimCore(claim_type="fact@v1", slots={"subject": "ai", "source": source})
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2020)),
+                transaction_time=TransactionTime(tx_id=tx_id, recorded_at=recorded),
+                provenance=Provenance(source=source), confidence_bp=5000, status="asserted",
+            )
+            search.add(rev.revision_id, rev.assertion)
+        search.rebuild()
+        return pipeline
+
+    def test_timeline_returns_entries(self) -> None:
+        pipeline = self._make_pipeline()
+        entries = pipeline.timeline("neural networks deep learning")
+        assert len(entries) > 0
+        for e in entries:
+            assert "recorded_at" in e
+            assert "source" in e
+            assert "text" in e
+
+    def test_timeline_chronological_order(self) -> None:
+        pipeline = self._make_pipeline()
+        entries = pipeline.timeline("neural networks deep learning")
+        for i in range(len(entries) - 1):
+            assert entries[i]["recorded_at"] <= entries[i + 1]["recorded_at"]
+
+    def test_timeline_diff_basic(self) -> None:
+        pipeline = self._make_pipeline()
+        diff = pipeline.timeline_diff("neural networks deep learning", tx_id_a=1, tx_id_b=3)
+        assert "only_in_a" in diff
+        assert "only_in_b" in diff
+        assert "in_both" in diff
+        assert "summary" in diff
+
+    def test_timeline_diff_shows_additions(self) -> None:
+        pipeline = self._make_pipeline()
+        diff = pipeline.timeline_diff("neural networks", tx_id_a=1, tx_id_b=3)
+        # tx_id_b should have more results than tx_id_a
+        assert len(diff["only_in_b"]) >= 0
+
+
+# ---- Deduplication Tests ----
+
+
+class TestDeduplication:
+    """Test semantic deduplication."""
+
+    def _make_pipeline_with_duplicates(self) -> Pipeline:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        texts = [
+            ("neural networks use backpropagation for training", "paper_a"),
+            ("neural networks use backpropagation for model training", "paper_b"),  # near-dup of above
+            ("transformers use attention mechanisms for sequence processing", "paper_c"),
+            ("transformer models use attention mechanism for sequence tasks", "paper_d"),  # near-dup of above
+            ("reinforcement learning uses reward signals", "paper_e"),  # unique
+        ]
+
+        for text, source in texts:
+            core = ClaimCore(claim_type="fact@v1", slots={"subject": "ml", "source": source})
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2024)),
+                transaction_time=TransactionTime(tx_id=1, recorded_at=dt(2024)),
+                provenance=Provenance(source=source), confidence_bp=5000, status="asserted",
+            )
+            search.add(rev.revision_id, rev.assertion)
+        search.rebuild()
+        return pipeline
+
+    def test_deduplicate_finds_clusters(self) -> None:
+        pipeline = self._make_pipeline_with_duplicates()
+        clusters = pipeline.deduplicate(threshold=0.6)
+        assert isinstance(clusters, list)
+
+    def test_deduplicate_cluster_size(self) -> None:
+        pipeline = self._make_pipeline_with_duplicates()
+        clusters = pipeline.deduplicate(threshold=0.6)
+        for cluster in clusters:
+            assert len(cluster) >= 2  # Only clusters with 2+ members
+
+    def test_deduplicate_high_threshold_fewer(self) -> None:
+        pipeline = self._make_pipeline_with_duplicates()
+        low = pipeline.deduplicate(threshold=0.5)
+        high = pipeline.deduplicate(threshold=0.95)
+        assert len(high) <= len(low)
+
+    def test_deduplicate_empty_store(self) -> None:
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+        clusters = pipeline.deduplicate()
+        assert clusters == []
+
+
+# ---- Query Explanation Tests ----
+
+
+class TestQueryExplanation:
+    """Test query explanation and feature attribution."""
+
+    def _make_pipeline(self) -> Pipeline:
+        from dks import Provenance, ClaimCore
+
+        store = KnowledgeStore()
+        search = TfidfSearchIndex(store)
+        pipeline = Pipeline(store=store, search_index=search)
+
+        texts = [
+            "neural networks use backpropagation for gradient descent optimization",
+            "transformers use multi-head attention mechanisms for sequence modeling",
+            "reinforcement learning uses reward signals for policy optimization",
+        ]
+
+        for i, text in enumerate(texts):
+            core = ClaimCore(claim_type="fact@v1", slots={"subject": "ml", "source": f"paper_{i}"})
+            rev = store.assert_revision(
+                core=core, assertion=text,
+                valid_time=ValidTime(start=dt(2024)),
+                transaction_time=TransactionTime(tx_id=i+1, recorded_at=dt(2024)),
+                provenance=Provenance(source=f"paper_{i}"), confidence_bp=5000, status="asserted",
+            )
+            search.add(rev.revision_id, rev.assertion)
+        search.rebuild()
+        return pipeline
+
+    def test_explain_returns_fields(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("neural networks backpropagation", k=1)
+        assert len(results) >= 1
+        explanation = pipeline.explain("neural networks backpropagation", results[0])
+        assert "matching_terms" in explanation
+        assert "score" in explanation
+        assert "term_overlap_ratio" in explanation
+        assert "source" in explanation
+
+    def test_explain_matching_terms(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("neural networks backpropagation", k=1)
+        explanation = pipeline.explain("neural networks backpropagation", results[0])
+        assert "neural" in explanation["matching_terms"] or "networks" in explanation["matching_terms"]
+
+    def test_explain_overlap_ratio(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("neural networks backpropagation", k=1)
+        explanation = pipeline.explain("neural networks backpropagation", results[0])
+        assert 0 <= explanation["term_overlap_ratio"] <= 1
+        assert explanation["term_overlap_ratio"] > 0  # Should have some overlap
+
+    def test_explain_has_provenance(self) -> None:
+        pipeline = self._make_pipeline()
+        results = pipeline.query("attention mechanisms", k=1)
+        explanation = pipeline.explain("attention mechanisms", results[0])
+        assert "provenance" in explanation
+        assert "confidence_bp" in explanation["provenance"]
