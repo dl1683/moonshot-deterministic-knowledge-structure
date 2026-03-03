@@ -2986,31 +2986,69 @@ class Pipeline:
             "every", "first", "last", "next", "part", "point",
             "right", "actually", "basically", "simply", "just",
             "world", "today", "google", "source", "image",
+            # Commercial/marketing
+            "please", "consider", "premium", "subscription", "cost",
+            "netflix", "price", "pricing", "buy", "sell", "offer",
+            "product", "service", "customer", "company", "business",
+            "plan", "trial", "account", "million", "billion",
+            # Web/platform terms
+            "website", "page", "site", "online", "http", "https",
+            "www", "com", "org", "html", "pdf", "file", "files",
+            # Filler verbs/adjectives
+            "based", "related", "specific", "general", "common",
+            "possible", "available", "similar", "across", "within",
+            "form", "answer", "question", "questions", "require",
+            "understand", "show", "shown", "shows", "mind",
+            "require", "required", "requires", "help", "helps",
+            "allows", "allow", "called", "known", "given",
+            "higher", "lower", "larger", "smaller", "better",
+            "result", "results", "example", "examples", "case",
+            "however", "therefore", "thus", "hence", "often",
+            "typically", "usually", "especially", "particularly",
+            # Overly generic ML terms (appear in every chunk)
+            "data", "model", "models", "training", "learning",
+            "systems", "system", "code", "text", "input", "output",
+            "layers", "layer", "process", "method", "methods",
+            "approach", "task", "tasks", "problem", "problems",
+            "performance", "accuracy", "number", "set", "sets",
+            "features", "feature", "information", "function",
+            "network", "networks", "algorithm", "algorithms",
+            "parameters", "parameter", "weights", "weight",
+            # More commercial/filler
+            "provide", "various", "consulting", "advisory",
+            "services", "impact", "impacts", "batch", "sizes",
+            "crippling", "chocolate", "milk", "recipes",
         }
 
-        # Extract words (2+ chars, alphabetic)
+        # Extract words (3+ chars, alphabetic)
         words = re.findall(r'\b[a-z]{3,}\b', text.lower())
         filtered = [w for w in words if w not in stop_words and len(w) > 3]
 
-        # Count bigrams too for better terms
+        # Count bigrams — both words must pass stop word filter
         bigrams = []
         for i in range(len(words) - 1):
-            if words[i] not in stop_words and words[i+1] not in stop_words:
-                bigrams.append(f"{words[i]} {words[i+1]}")
+            w1, w2 = words[i], words[i+1]
+            if w1 not in stop_words and w2 not in stop_words and len(w1) > 3 and len(w2) > 3:
+                bigrams.append(f"{w1} {w2}")
 
         # Combine unigram and bigram counts
         counter = Counter(filtered)
         bigram_counter = Counter(bigrams)
 
-        # Prefer bigrams (more specific)
+        # Prefer bigrams (more specific), require count >= 2
         terms: list[str] = []
-        for term, count in bigram_counter.most_common(max_terms):
-            if count >= 2:
-                terms.append(term)
-        for term, count in counter.most_common(max_terms * 2):
+        seen_words: set[str] = set()
+        for term, count in bigram_counter.most_common(max_terms * 2):
+            if count >= 2 and len(terms) < max_terms:
+                # Skip bigrams with very short words or non-alpha chars
+                parts = term.split()
+                if all(len(p) > 3 and p.isalpha() for p in parts):
+                    terms.append(term)
+                    seen_words.update(parts)
+        for term, count in counter.most_common(max_terms * 3):
             if len(terms) >= max_terms:
                 break
-            if term not in " ".join(terms):
+            if term.isalpha() and term not in seen_words and term not in " ".join(terms):
                 terms.append(term)
 
         return terms[:max_terms]
