@@ -670,7 +670,7 @@ class Pipeline:
         """Show when knowledge was added over time."""
         return self._explorer.ingestion_timeline()
 
-    def scan_contradictions(self, *, k: int = 10, threshold: float = 0.6) -> list[dict[str, Any]]:
+    def scan_contradictions(self, *, k: int = 10, threshold: float = 0.15) -> list[dict[str, Any]]:
         """Scan corpus for potentially contradictory claims."""
         return self._explorer.scan_contradictions(k=k, threshold=threshold)
 

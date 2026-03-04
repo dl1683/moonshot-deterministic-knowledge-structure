@@ -460,7 +460,7 @@ class Explorer:
             else:
                 freq_score = -20  # Very ubiquitous = penalty
 
-            quality = source_score + cluster_score + freq_score
+            quality = max(0, source_score + cluster_score + freq_score)
 
             entities_analyzed.append({
                 "entity": entity,
@@ -572,11 +572,15 @@ class Explorer:
     def get_entity_decisions(self) -> dict[str, str]:
         """Retrieve all entity review decisions.
 
+        When multiple decisions exist for the same entity, the most recent
+        decision (by transaction_time.tx_id) wins.
+
         Returns:
             Dict mapping entity -> "accepted" or "rejected".
         """
         retracted = self.store.retracted_core_ids()
-        decisions: dict[str, str] = {}
+        # Track (decision, tx_id) per entity — latest tx_id wins
+        decisions_with_tx: dict[str, tuple[str, int]] = {}
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted" or rev.core_id in retracted:
                 continue
@@ -585,8 +589,11 @@ class Explorer:
                 entity = core.slots.get("entity", "")
                 decision = core.slots.get("decision", "")
                 if entity and decision:
-                    decisions[entity] = decision
-        return decisions
+                    tx_id = rev.transaction_time.tx_id
+                    current = decisions_with_tx.get(entity)
+                    if current is None or tx_id > current[1]:
+                        decisions_with_tx[entity] = (decision, tx_id)
+        return {entity: dec for entity, (dec, _) in decisions_with_tx.items()}
 
     # ---- Source Management ----
 
@@ -1252,7 +1259,7 @@ class Explorer:
 
         return result
 
-    def scan_contradictions(self, *, k: int = 10, threshold: float = 0.6) -> list[dict[str, Any]]:
+    def scan_contradictions(self, *, k: int = 10, threshold: float = 0.15) -> list[dict[str, Any]]:
         """Scan entire corpus for claims that potentially contradict each other.
 
         Unlike contradictions(topic), this scans all chunks without a topic filter.

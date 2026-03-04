@@ -205,6 +205,7 @@ class MCPToolHandler:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "topic": {"type": "string", "description": "Optional topic to focus contradiction search on"},
                         "k": {"type": "integer", "description": "Max contradiction pairs to find", "default": 10},
                     },
                 },
@@ -522,7 +523,11 @@ class MCPToolHandler:
         return self._pipeline.compare_sources(source_a, source_b)
 
     def _handle_contradictions(self, args: dict[str, Any]) -> dict[str, Any]:
+        topic = args.get("topic")
         k = args.get("k", 10)
+        if topic:
+            results = self._pipeline.contradictions(topic, k=k)
+            return {"contradictions": results if isinstance(results, list) else [results]}
         return {"contradictions": self._pipeline.scan_contradictions(k=k)}
 
     def _handle_staleness(self, args: dict[str, Any]) -> dict[str, Any]:
