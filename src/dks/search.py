@@ -61,6 +61,16 @@ _STOP_WORDS: frozenset[str] = frozenset({
     "don", "didn", "doesn", "won", "ll", "ve", "re",
 })
 
+# Negation words used across contradiction detection and confidence scoring.
+_NEGATION_WORDS: frozenset[str] = frozenset({
+    "not", "no", "never", "neither", "nor", "none", "nothing",
+    "nowhere", "hardly", "scarcely", "barely", "seldom", "rarely",
+    "doesn't", "don't", "didn't", "won't", "wouldn't", "couldn't",
+    "shouldn't", "isn't", "aren't", "wasn't", "weren't", "cannot", "can't",
+    "without", "lack", "fail", "false", "incorrect", "wrong",
+    "unlike", "contrary",
+})
+
 
 class SearchEngine:
     """Holds all search and reasoning methods.
@@ -2458,12 +2468,7 @@ class SearchEngine:
                         pairs_with_similarity.append((i, j, 0.5))
 
         # Detect contradiction signals
-        negation_words = {
-            "not", "no", "never", "neither", "nor", "none", "nothing",
-            "nowhere", "hardly", "scarcely", "barely", "doesn't", "don't",
-            "didn't", "won't", "wouldn't", "couldn't", "shouldn't",
-            "isn't", "aren't", "wasn't", "weren't", "cannot", "can't",
-        }
+        negation_words = _NEGATION_WORDS
         opposition_pairs = [
             ("increase", "decrease"), ("improve", "worsen"), ("better", "worse"),
             ("higher", "lower"), ("more", "less"), ("faster", "slower"),
@@ -2589,10 +2594,7 @@ class SearchEngine:
 
         # Check for negation/contradiction signals vs the claim
         claim_words = set(re.findall(r'\b\w+\b', claim.lower()))
-        negation_words = {
-            "not", "no", "never", "neither", "nor", "none",
-            "doesn't", "don't", "didn't", "won't", "cannot", "can't",
-        }
+        negation_words = _NEGATION_WORDS
         claim_has_negation = bool(claim_words & negation_words)
 
         supporting = 0

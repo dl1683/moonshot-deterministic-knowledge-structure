@@ -13,6 +13,16 @@ from typing import Any, Callable
 
 from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidTime, canonicalize_text
 
+# Negation words for contradiction detection — shared set for consistency.
+_NEGATION_WORDS: frozenset[str] = frozenset({
+    "not", "no", "never", "neither", "nor", "none", "nothing",
+    "nowhere", "hardly", "scarcely", "barely", "seldom", "rarely",
+    "doesn't", "don't", "didn't", "won't", "wouldn't", "couldn't",
+    "shouldn't", "isn't", "aren't", "wasn't", "weren't", "cannot", "can't",
+    "without", "lack", "fail", "false", "incorrect", "wrong",
+    "unlike", "contrary",
+})
+
 
 class Explorer:
     """Browse, annotate, and analyze the knowledge corpus.
@@ -1275,12 +1285,8 @@ class Explorer:
             List of contradiction pairs with evidence.
         """
         # Negation signals that suggest contradiction
-        negation_markers = {
-            "not", "no", "never", "neither", "nor", "cannot", "can't",
-            "don't", "doesn't", "didn't", "won't", "wouldn't", "isn't",
-            "aren't", "wasn't", "weren't", "hardly", "rarely", "seldom",
-            "without", "lack", "fail", "false", "incorrect", "wrong",
-            "unlike", "contrary", "however", "but", "although", "despite",
+        negation_markers = _NEGATION_WORDS | {
+            "however", "but", "although", "despite",
             "rather than", "instead of", "on the other hand",
         }
 
