@@ -407,6 +407,16 @@ class Pipeline:
         self._ingester.store = self.store
         self._search.store = self.store
         self._explorer.store = self.store
+        # Merge chunk siblings from other pipeline
+        for source, rids in other._chunk_siblings.items():
+            if source not in self._chunk_siblings:
+                self._chunk_siblings[source] = rids
+            else:
+                # Merge revision lists, avoiding duplicates
+                existing = set(self._chunk_siblings[source])
+                self._chunk_siblings[source].extend(
+                    rid for rid in rids if rid not in existing
+                )
         # Invalidate stale graph — must rebuild after merge
         # Explorer._graph is a property that reads pipeline._graph via _graph_fn
         self._graph = None

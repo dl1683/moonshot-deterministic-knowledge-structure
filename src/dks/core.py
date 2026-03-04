@@ -2576,21 +2576,22 @@ class KnowledgeStore:
         ] = {}
         self._revisions_by_core: Dict[str, set[str]] = {}
         self._merge_conflict_journal: tuple[tuple[int, MergeResult], ...] = ()
-        self._retracted_cache: Optional[set[str]] = None
+        self._retracted_cache: Optional[frozenset[str]] = None
 
-    def retracted_core_ids(self) -> set[str]:
+    def retracted_core_ids(self) -> frozenset[str]:
         """Return core_ids that have ANY retracted revision.
 
         Retraction is permanent for a core_id: once a retraction revision
         exists, the core is considered tainted regardless of later assertions.
         To reassert a claim, create a NEW core with fresh content.
 
-        Results are cached and invalidated on assert_revision() calls.
+        Results are cached as frozenset (immutable) and invalidated on
+        assert_revision() calls.
         """
         if self._retracted_cache is not None:
             return self._retracted_cache
-        result = {rev.core_id for rev in self.revisions.values()
-                  if rev.status == "retracted"}
+        result = frozenset(rev.core_id for rev in self.revisions.values()
+                           if rev.status == "retracted")
         self._retracted_cache = result
         return result
 
@@ -3768,6 +3769,10 @@ class KnowledgeStore:
         confidence_bp: int,
         status: Literal["asserted", "retracted"] = "asserted",
     ) -> ClaimRevision:
+        if status not in ("asserted", "retracted"):
+            raise ValueError(
+                f"Invalid status: {status!r}. Must be 'asserted' or 'retracted'."
+            )
         existing_core = self.cores.get(core.core_id)
         if existing_core is not None and existing_core != core:
             raise ValueError(f"core_id collision: {core.core_id}")
