@@ -279,7 +279,7 @@ class Pipeline:
         # 1. Save the deterministic store
         self.store.to_canonical_json_file(str(directory / "store.json"))
 
-        # 2. Save TF-IDF index state
+        # 2. Save index state via serialization interfaces
         tfidf_component = None
         dense_component = None
 
@@ -292,33 +292,30 @@ class Pipeline:
             dense_component = self._index._dense
 
         if tfidf_component is not None:
-            tfidf_state = {
-                "texts": tfidf_component._texts,
-                "revision_ids": tfidf_component._revision_ids,
-                "fitted": tfidf_component._fitted,
-            }
+            tfidf_state = tfidf_component.get_state()
+            # Save lightweight state separately from heavy objects
             with open(directory / "tfidf_state.pkl", "wb") as f:
-                pickle.dump(tfidf_state, f)
-            if tfidf_component._fitted:
+                pickle.dump({
+                    "texts": tfidf_state["texts"],
+                    "revision_ids": tfidf_state["revision_ids"],
+                    "fitted": tfidf_state["fitted"],
+                }, f)
+            if tfidf_state["fitted"]:
                 with open(directory / "tfidf_vectorizer.pkl", "wb") as f:
-                    pickle.dump(tfidf_component._vectorizer, f)
+                    pickle.dump(tfidf_state["vectorizer"], f)
                 with open(directory / "tfidf_matrix.pkl", "wb") as f:
-                    pickle.dump(tfidf_component._matrix, f)
+                    pickle.dump(tfidf_state["matrix"], f)
 
         # 2b. Save dense embeddings
         if dense_component is not None:
-            dense_component.save_embeddings(directory / "dense_embeddings.pkl")
+            dense_state = dense_component.get_state()
+            with open(directory / "dense_embeddings.pkl", "wb") as f:
+                pickle.dump(dense_state, f)
 
-        # 3. Save knowledge graph
+        # 3. Save knowledge graph via serialization interface
         if hasattr(self, "_graph") and self._graph is not None:
-            graph_state = {
-                "adjacency": self._graph._adjacency,
-                "clusters": self._graph._clusters,
-                "revision_cluster": self._graph._revision_cluster,
-                "cluster_labels": self._graph._cluster_labels,
-            }
             with open(directory / "graph.pkl", "wb") as f:
-                pickle.dump(graph_state, f)
+                pickle.dump(self._graph.get_state(), f)
 
         # 4. Save chunk siblings map
         if self._chunk_siblings:
@@ -335,12 +332,12 @@ class Pipeline:
         }
         if isinstance(self._index, HybridSearchIndex):
             meta["index_type"] = "hybrid"
-            meta["indexed"] = self._index._dense.size
+            meta["indexed"] = self._index.size
             meta["hybrid_alpha"] = self._index._alpha
             meta["hybrid_rrf_k"] = self._index._rrf_k
         elif isinstance(self._index, DenseSearchIndex):
             meta["index_type"] = "dense"
-            meta["indexed"] = self._index._dense.size
+            meta["indexed"] = self._index.size
         elif isinstance(self._index, TfidfSearchIndex):
             meta["index_type"] = "tfidf"
             meta["indexed"] = self._index.size
@@ -349,16 +346,16 @@ class Pipeline:
             meta["graph_edges"] = self._graph.total_edges
             meta["graph_clusters"] = self._graph.total_clusters
 
-        # Save dense model name so we can restore the correct model
-        if dense_component is not None and hasattr(dense_component, '_model') and dense_component._model is not None:
-            model_name = getattr(dense_component._model, '_model_card_vars', {}).get('name', None)
-            if model_name is None:
-                # Fallback: try to get model name from model path
-                model_path = getattr(dense_component._model, 'model_card_data', None)
-                if model_path and hasattr(model_path, 'model_name'):
-                    model_name = model_path.model_name
-            if model_name:
-                meta["dense_model_name"] = model_name
+        # Save dense model name for restoration
+        if dense_component is not None:
+            model = getattr(dense_component, '_model', None)
+            if model is not None:
+                model_name = None
+                card_data = getattr(model, 'model_card_data', None)
+                if card_data and hasattr(card_data, 'model_name'):
+                    model_name = card_data.model_name
+                if model_name:
+                    meta["dense_model_name"] = model_name
 
         with open(directory / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
@@ -386,52 +383,27 @@ class Pipeline:
         with open(directory / "meta.json") as f:
             meta = json.load(f)
 
-        # 3. Restore search index
+        # 3. Restore search index via from_state interfaces
         search_index = None
         index_type = meta.get("index_type", "tfidf")
 
-        # 3a. Restore TF-IDF component (used by tfidf and hybrid)
+        # 3a. Restore TF-IDF component
         tfidf = None
         if (directory / "tfidf_state.pkl").exists():
             from .index import TfidfIndex
-
             tfidf_state = _safe_pickle_load(directory / "tfidf_state.pkl")
+            if tfidf_state["fitted"] and (directory / "tfidf_vectorizer.pkl").exists():
+                tfidf_state["vectorizer"] = _safe_pickle_load(directory / "tfidf_vectorizer.pkl")
+                tfidf_state["matrix"] = _safe_pickle_load(directory / "tfidf_matrix.pkl")
+            tfidf = TfidfIndex.from_state(tfidf_state)
 
-            tfidf = TfidfIndex.__new__(TfidfIndex)
-            tfidf._texts = tfidf_state["texts"]
-            tfidf._revision_ids = tfidf_state["revision_ids"]
-            tfidf._fitted = tfidf_state["fitted"]
-
-            if tfidf._fitted and (directory / "tfidf_vectorizer.pkl").exists():
-                tfidf._vectorizer = _safe_pickle_load(directory / "tfidf_vectorizer.pkl")
-                tfidf._matrix = _safe_pickle_load(directory / "tfidf_matrix.pkl")
-            else:
-                from sklearn.feature_extraction.text import TfidfVectorizer
-                tfidf._vectorizer = TfidfVectorizer()
-                tfidf._matrix = None
-
-        # 3b. Restore dense component (used by dense and hybrid)
+        # 3b. Restore dense component
         dense = None
         if (directory / "dense_embeddings.pkl").exists():
             from .index import SentenceTransformerIndex
-            dense = SentenceTransformerIndex.__new__(SentenceTransformerIndex)
-            # Set defaults before loading
-            dense._batch_size = 64
-            dense._dirty = True
-            # Restore the correct model (use saved name, fallback to default)
-            model_name = meta.get("dense_model_name", "all-MiniLM-L6-v2")
-            try:
-                from sentence_transformers import SentenceTransformer
-                dense._model = SentenceTransformer(model_name)
-                dense._dimension = dense._model.get_sentence_embedding_dimension()
-            except ImportError:
-                dense._model = None
-                dense._dimension = 384
             dense_state = _safe_pickle_load(directory / "dense_embeddings.pkl")
-            dense._texts = dense_state["texts"]
-            dense._revision_ids = dense_state["revision_ids"]
-            dense._embeddings = dense_state["embeddings"]
-            dense._dirty = False
+            model_name = meta.get("dense_model_name", "all-MiniLM-L6-v2")
+            dense = SentenceTransformerIndex.from_state(dense_state, model_name=model_name)
 
         # 3c. Assemble the correct index type
         if index_type == "hybrid" and tfidf is not None and dense is not None:
@@ -457,18 +429,11 @@ class Pipeline:
         pipeline._tx_counter = meta.get("tx_counter", 0)
         pipeline._index_dirty = meta.get("index_dirty", False)
 
-        # 5. Restore knowledge graph
+        # 5. Restore knowledge graph via from_state
         if (directory / "graph.pkl").exists():
             from .index import KnowledgeGraph
-
             graph_state = _safe_pickle_load(directory / "graph.pkl")
-
-            graph = KnowledgeGraph()
-            graph._adjacency = graph_state["adjacency"]
-            graph._clusters = graph_state["clusters"]
-            graph._revision_cluster = graph_state["revision_cluster"]
-            graph._cluster_labels = graph_state["cluster_labels"]
-            pipeline._graph = graph
+            pipeline._graph = KnowledgeGraph.from_state(graph_state)
 
         # 6. Restore chunk siblings
         if (directory / "chunk_siblings.pkl").exists():

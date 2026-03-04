@@ -353,6 +353,30 @@ class TfidfIndex:
     def size(self) -> int:
         return len(self._texts)
 
+    def get_state(self) -> dict:
+        """Return serializable state for persistence."""
+        return {
+            "texts": self._texts,
+            "revision_ids": self._revision_ids,
+            "fitted": self._fitted,
+            "vectorizer": self._vectorizer if self._fitted else None,
+            "matrix": self._matrix,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "TfidfIndex":
+        """Restore from saved state without re-importing sklearn."""
+        obj = cls.__new__(cls)
+        obj._texts = state["texts"]
+        obj._revision_ids = state["revision_ids"]
+        obj._fitted = state["fitted"]
+        obj._vectorizer = state.get("vectorizer")
+        obj._matrix = state.get("matrix")
+        if obj._vectorizer is None:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            obj._vectorizer = TfidfVectorizer()
+        return obj
+
 
 class TfidfSearchIndex:
     """Full search index combining TF-IDF with temporal awareness.
@@ -628,6 +652,40 @@ class KnowledgeGraph:
     def total_clusters(self) -> int:
         return len(self._clusters)
 
+    @property
+    def clusters(self) -> dict[int, list[str]]:
+        """Read-only access to cluster_id -> revision_ids mapping."""
+        return self._clusters
+
+    @property
+    def revision_cluster(self) -> dict[str, int]:
+        """Read-only access to revision_id -> cluster_id mapping."""
+        return self._revision_cluster
+
+    @property
+    def cluster_labels_map(self) -> dict[int, list[str]]:
+        """Read-only access to cluster_id -> top terms mapping."""
+        return self._cluster_labels
+
+    def get_state(self) -> dict:
+        """Return serializable state for persistence."""
+        return {
+            "adjacency": self._adjacency,
+            "clusters": self._clusters,
+            "revision_cluster": self._revision_cluster,
+            "cluster_labels": self._cluster_labels,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "KnowledgeGraph":
+        """Restore from saved state."""
+        obj = cls()
+        obj._adjacency = state["adjacency"]
+        obj._clusters = state["clusters"]
+        obj._revision_cluster = state["revision_cluster"]
+        obj._cluster_labels = state["cluster_labels"]
+        return obj
+
 
 class SentenceTransformerIndex:
     """Dense embedding search using sentence-transformers.
@@ -792,6 +850,36 @@ class SentenceTransformerIndex:
     @property
     def size(self) -> int:
         return len(self._texts)
+
+    def get_state(self) -> dict:
+        """Return serializable state for persistence."""
+        if self._dirty or self._embeddings is None:
+            if self._texts:
+                self.rebuild()
+        return {
+            "texts": self._texts,
+            "revision_ids": self._revision_ids,
+            "embeddings": self._embeddings,
+            "dimension": self._dimension,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict, model_name: str = "all-MiniLM-L6-v2") -> "SentenceTransformerIndex":
+        """Restore from saved state."""
+        obj = cls.__new__(cls)
+        obj._batch_size = 64
+        obj._texts = state["texts"]
+        obj._revision_ids = state["revision_ids"]
+        obj._embeddings = state["embeddings"]
+        obj._dimension = state.get("dimension", 384)
+        obj._dirty = False
+        try:
+            from sentence_transformers import SentenceTransformer
+            obj._model = SentenceTransformer(model_name)
+            obj._dimension = obj._model.get_sentence_embedding_dimension()
+        except ImportError:
+            obj._model = None
+        return obj
 
 
 class DenseSearchIndex:

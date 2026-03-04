@@ -83,7 +83,7 @@ class Explorer:
         retracted_cores = self._retracted_cores()
         n_chunks = sum(1 for rev in self.store.revisions.values()
                        if rev.status == "asserted" and rev.core_id not in retracted_cores)
-        rev_to_cluster = getattr(self._graph, '_revision_cluster', {})
+        rev_to_cluster = self._graph.revision_cluster if self._graph else {}
 
         # ---- Source analysis ----
         source_chunks: dict[str, list[str]] = {}  # source -> [revision_ids]
@@ -104,8 +104,8 @@ class Explorer:
 
         # ---- Cluster profiles ----
         cluster_profiles = []
-        clusters = getattr(self._graph, '_clusters', {})
-        cluster_labels = getattr(self._graph, '_cluster_labels', {})
+        clusters = self._graph.clusters if self._graph else {}
+        cluster_labels = self._graph.cluster_labels_map if self._graph else {}
 
         for cid, members in sorted(clusters.items()):
             # Filter to active members only
@@ -236,7 +236,7 @@ class Explorer:
                 "chunks": n_chunks,
                 "sources": n_sources,
                 "clusters": len(clusters),
-                "edges": sum(len(adj) for adj in self._graph._adjacency.values()),
+                "edges": self._graph.total_edges,
             },
             "clusters": cluster_profiles,
             "sources": source_stats[:20],  # Top 20 sources
@@ -318,7 +318,7 @@ class Explorer:
         if self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
 
-        clusters = getattr(self._graph, '_clusters', {})
+        clusters = self._graph.clusters if self._graph else {}
         members = clusters.get(cluster_id, [])
         if not members:
             return {"retracted_count": 0, "affected_sources": []}
@@ -388,7 +388,7 @@ class Explorer:
         top_entities = link_result.get("top_entities", [])
 
         retracted_cores = self._retracted_cores()
-        rev_to_cluster = getattr(self._graph, '_revision_cluster', {})
+        rev_to_cluster = self._graph.revision_cluster if self._graph else {}
         n_chunks = sum(1 for rev in self.store.revisions.values()
                        if rev.status == "asserted" and rev.core_id not in retracted_cores)
 
@@ -635,7 +635,7 @@ class Explorer:
         cluster_dist: dict[int, int] = {}
         rev_cluster = {}
         if self._graph is not None:
-            rev_cluster = getattr(self._graph, '_revision_cluster', {})
+            rev_cluster = self._graph.revision_cluster if self._graph else {}
         for c in chunks:
             cid = rev_cluster.get(c["revision_id"])
             if cid is not None:
@@ -739,7 +739,7 @@ class Explorer:
         if self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
 
-        clusters = getattr(self._graph, '_clusters', {})
+        clusters = self._graph.clusters if self._graph else {}
         members = clusters.get(cluster_id, [])
         retracted_cores = self._retracted_cores()
 
@@ -797,7 +797,7 @@ class Explorer:
         chunks: list[dict[str, Any]] = []
         rev_cluster = {}
         if self._graph is not None:
-            rev_cluster = getattr(self._graph, '_revision_cluster', {})
+            rev_cluster = self._graph.revision_cluster if self._graph else {}
 
         for rid, rev in self.store.revisions.items():
             if rev.status != "asserted":
@@ -855,14 +855,13 @@ class Explorer:
         # Cluster info
         cluster_id = None
         if self._graph is not None:
-            rev_cluster = getattr(self._graph, '_revision_cluster', {})
+            rev_cluster = self._graph.revision_cluster if self._graph else {}
             cluster_id = rev_cluster.get(revision_id)
 
         # Neighbors from graph
         neighbor_previews: list[dict[str, Any]] = []
         if self._graph is not None:
-            adj = self._graph._adjacency.get(revision_id, [])
-            for nid, weight in sorted(adj, key=lambda x: -x[1])[:5]:
+            for nid, weight in self._graph.neighbors(revision_id, k=5):
                 n_rev = self.store.revisions.get(nid)
                 if n_rev is None:
                     continue
@@ -910,8 +909,8 @@ class Explorer:
             raise ValueError("Graph not built. Call build_graph() first.")
 
         issues: list[dict[str, Any]] = []
-        rev_cluster = getattr(self._graph, '_revision_cluster', {})
-        clusters = getattr(self._graph, '_clusters', {})
+        rev_cluster = self._graph.revision_cluster if self._graph else {}
+        clusters = self._graph.clusters if self._graph else {}
         retracted_cores = self._retracted_cores()
 
         # Collect per-source and per-chunk data
