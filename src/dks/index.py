@@ -281,6 +281,8 @@ class TfidfIndex:
     def rebuild(self) -> None:
         """Rebuild the TF-IDF matrix from all stored texts."""
         if not self._texts:
+            self._matrix = None
+            self._fitted = True
             return
         self._matrix = self._vectorizer.fit_transform(self._texts)
         self._fitted = True
