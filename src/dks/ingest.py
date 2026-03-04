@@ -158,7 +158,7 @@ class Ingester:
             return []
 
         vt = valid_time or ValidTime(
-            start=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            start=datetime.now(timezone.utc),
             end=None,
         )
         tt = transaction_time or self._tx_factory()

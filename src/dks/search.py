@@ -2545,6 +2545,7 @@ class SearchEngine:
         k: int = 10,
         valid_at: Optional[datetime] = None,
         tx_id: Optional[int] = None,
+        recency_window_years: int = 5,
     ) -> dict[str, Any]:
         """Assess confidence in a claim based on evidence in the store.
 
@@ -2559,6 +2560,7 @@ class SearchEngine:
             k: Number of chunks to analyze.
             valid_at: Temporal filter.
             tx_id: Transaction time cutoff.
+            recency_window_years: Window for recency scoring (default 5).
 
         Returns:
             Dict with:
@@ -2615,10 +2617,9 @@ class SearchEngine:
             rev = self.store.revisions.get(r.revision_id)
             if rev:
                 tx_recorded = rev.transaction_time.recorded_at
-                # Score based on how recent (within last 5 years)
                 now = datetime.now(timezone.utc)
                 age_days = (now - tx_recorded).days
-                recency = max(0.0, 1.0 - age_days / (365 * 5))
+                recency = max(0.0, 1.0 - age_days / (365 * recency_window_years))
                 recency_scores.append(recency)
         recency_score = sum(recency_scores) / len(recency_scores) if recency_scores else 0.0
 

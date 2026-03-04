@@ -326,10 +326,13 @@ class Pipeline:
             "cores": len(self.store.cores),
             "revisions": len(self.store.revisions),
             "tx_counter": self._tx_counter,
+            "index_dirty": self._index_dirty,
         }
         if isinstance(self._index, HybridSearchIndex):
             meta["index_type"] = "hybrid"
             meta["indexed"] = self._index._dense.size
+            meta["hybrid_alpha"] = self._index._alpha
+            meta["hybrid_rrf_k"] = self._index._rrf_k
         elif isinstance(self._index, DenseSearchIndex):
             meta["index_type"] = "dense"
             meta["indexed"] = self._index._dense.size
@@ -432,8 +435,8 @@ class Pipeline:
             search_index._store = store
             search_index._tfidf = tfidf
             search_index._dense = dense
-            search_index._alpha = 0.5
-            search_index._rrf_k = 60
+            search_index._alpha = meta.get("hybrid_alpha", 0.5)
+            search_index._rrf_k = meta.get("hybrid_rrf_k", 60)
         elif index_type == "dense" and dense is not None:
             from .index import DenseSearchIndex
             search_index = DenseSearchIndex.__new__(DenseSearchIndex)
@@ -447,6 +450,7 @@ class Pipeline:
         # 4. Create pipeline
         pipeline = cls(store=store, search_index=search_index)
         pipeline._tx_counter = meta.get("tx_counter", 0)
+        pipeline._index_dirty = meta.get("index_dirty", False)
 
         # 5. Restore knowledge graph
         if (directory / "graph.pkl").exists():
