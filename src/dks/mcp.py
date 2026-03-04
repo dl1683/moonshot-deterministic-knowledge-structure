@@ -31,7 +31,7 @@ class MCPToolHandler:
 
     def _next_tx(self) -> TransactionTime:
         """Delegate to Pipeline's tx counter to avoid tx_id collisions."""
-        return self._pipeline._next_tx()
+        return self._pipeline.next_tx()
 
     def list_tools(self) -> list[dict[str, Any]]:
         """Return MCP tool definitions."""

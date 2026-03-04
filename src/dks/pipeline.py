@@ -151,7 +151,7 @@ class Pipeline:
             extractor=self._extractor,
             resolver=self._resolver,
             index=self._index,
-            tx_factory=self._next_tx,
+            tx_factory=self.next_tx,
             chunk_siblings=self._chunk_siblings,
         )
         # SearchEngine (delegates search/reasoning operations)
@@ -168,7 +168,7 @@ class Pipeline:
         self._explorer = Explorer(
             store=self.store,
             graph_fn=lambda: getattr(self, '_graph', None),
-            tx_factory=self._next_tx,
+            tx_factory=self.next_tx,
             query_fn=self._search.query,
             stats_fn=self.stats,
             topics_fn=self.topics,
@@ -197,7 +197,7 @@ class Pipeline:
             trace = self._audit.last_trace
         return AuditManager.render(trace)
 
-    def _next_tx(self) -> TransactionTime:
+    def next_tx(self) -> TransactionTime:
         """Auto-generate next transaction time."""
         self._tx_counter += 1
         return TransactionTime(
