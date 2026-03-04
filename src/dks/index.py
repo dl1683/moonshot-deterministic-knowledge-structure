@@ -423,6 +423,14 @@ class TfidfSearchIndex:
     def size(self) -> int:
         return self._tfidf.size
 
+    @classmethod
+    def from_state(cls, store: KnowledgeStore, tfidf: TfidfIndex) -> "TfidfSearchIndex":
+        """Restore from a pre-built TfidfIndex component."""
+        obj = cls.__new__(cls)
+        obj._store = store
+        obj._tfidf = tfidf
+        return obj
+
 
 class KnowledgeGraph:
     """Derived graph structure linking related chunks by TF-IDF similarity.
@@ -555,6 +563,19 @@ class KnowledgeGraph:
         """
         adj = self._adjacency.get(revision_id, [])
         return adj[:k]
+
+    def add_edge(self, from_id: str, to_id: str, score: float) -> bool:
+        """Add a directed edge between two revisions.
+
+        Returns True if the edge was added, False if it already existed.
+        """
+        if from_id not in self._adjacency:
+            self._adjacency[from_id] = []
+        existing = {nid for nid, _ in self._adjacency[from_id]}
+        if to_id not in existing:
+            self._adjacency[from_id].append((to_id, score))
+            return True
+        return False
 
     def cluster_of(self, revision_id: str) -> int | None:
         """Get the cluster ID of a revision."""
@@ -878,7 +899,10 @@ class SentenceTransformerIndex:
             obj._model = SentenceTransformer(model_name)
             obj._dimension = obj._model.get_sentence_embedding_dimension()
         except ImportError:
-            obj._model = None
+            raise ImportError(
+                "sentence-transformers required to load dense embeddings: "
+                "pip install sentence-transformers"
+            )
         return obj
 
 
@@ -924,6 +948,14 @@ class DenseSearchIndex:
     @property
     def size(self) -> int:
         return self._dense.size
+
+    @classmethod
+    def from_state(cls, store: KnowledgeStore, dense: SentenceTransformerIndex) -> "DenseSearchIndex":
+        """Restore from a pre-built SentenceTransformerIndex component."""
+        obj = cls.__new__(cls)
+        obj._store = store
+        obj._dense = dense
+        return obj
 
 
 class HybridSearchIndex:
@@ -1024,6 +1056,25 @@ class HybridSearchIndex:
     @property
     def size(self) -> int:
         return self._tfidf.size
+
+    @classmethod
+    def from_state(
+        cls,
+        store: KnowledgeStore,
+        tfidf: TfidfIndex,
+        dense: SentenceTransformerIndex,
+        *,
+        alpha: float = 0.5,
+        rrf_k: int = 60,
+    ) -> "HybridSearchIndex":
+        """Restore from pre-built TF-IDF and dense components."""
+        obj = cls.__new__(cls)
+        obj._store = store
+        obj._tfidf = tfidf
+        obj._dense = dense
+        obj._alpha = alpha
+        obj._rrf_k = rrf_k
+        return obj
 
 
 class CrossEncoderReranker:

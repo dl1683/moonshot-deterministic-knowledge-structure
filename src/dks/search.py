@@ -703,12 +703,7 @@ class SearchEngine:
                                  len(chunk_entities.get(neighbor_id, set())))
                 edge_score = shared_count / max(max_shared, 1)
 
-                if rev_id not in graph._adjacency:
-                    graph._adjacency[rev_id] = []
-                # Check if edge already exists
-                existing = {nid for nid, _ in graph._adjacency.get(rev_id, [])}
-                if neighbor_id not in existing:
-                    graph._adjacency[rev_id].append((neighbor_id, edge_score))
+                if graph.add_edge(rev_id, neighbor_id, edge_score):
                     total_links += 1
                     edges_added += 1
 

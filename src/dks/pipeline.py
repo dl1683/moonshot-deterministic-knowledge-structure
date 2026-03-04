@@ -143,6 +143,8 @@ class Pipeline:
         self._chunk_siblings: dict[str, list[str]] = {}
         # Dirty flag: set True after retraction ops, triggers auto-rebuild on next search
         self._index_dirty = False
+        # Knowledge graph (built lazily via build_graph())
+        self._graph: KnowledgeGraph | None = None
         # Audit trail
         self._audit = AuditManager()
         # Ingester (delegates ingest operations)
@@ -314,7 +316,7 @@ class Pipeline:
                 pickle.dump(dense_state, f)
 
         # 3. Save knowledge graph via serialization interface
-        if hasattr(self, "_graph") and self._graph is not None:
+        if self._graph is not None:
             with open(directory / "graph.pkl", "wb") as f:
                 pickle.dump(self._graph.get_state(), f)
 
@@ -342,7 +344,7 @@ class Pipeline:
         elif isinstance(self._index, TfidfSearchIndex):
             meta["index_type"] = "tfidf"
             meta["indexed"] = self._index.size
-        if hasattr(self, "_graph") and self._graph is not None:
+        if self._graph is not None:
             meta["graph_nodes"] = self._graph.total_nodes
             meta["graph_edges"] = self._graph.total_edges
             meta["graph_clusters"] = self._graph.total_clusters
@@ -406,24 +408,19 @@ class Pipeline:
             model_name = meta.get("dense_model_name", "all-MiniLM-L6-v2")
             dense = SentenceTransformerIndex.from_state(dense_state, model_name=model_name)
 
-        # 3c. Assemble the correct index type
+        # 3c. Assemble the correct index type via from_state
         if index_type == "hybrid" and tfidf is not None and dense is not None:
             from .index import HybridSearchIndex
-            search_index = HybridSearchIndex.__new__(HybridSearchIndex)
-            search_index._store = store
-            search_index._tfidf = tfidf
-            search_index._dense = dense
-            search_index._alpha = meta.get("hybrid_alpha", 0.5)
-            search_index._rrf_k = meta.get("hybrid_rrf_k", 60)
+            search_index = HybridSearchIndex.from_state(
+                store, tfidf, dense,
+                alpha=meta.get("hybrid_alpha", 0.5),
+                rrf_k=meta.get("hybrid_rrf_k", 60),
+            )
         elif index_type == "dense" and dense is not None:
             from .index import DenseSearchIndex
-            search_index = DenseSearchIndex.__new__(DenseSearchIndex)
-            search_index._store = store
-            search_index._dense = dense
+            search_index = DenseSearchIndex.from_state(store, dense)
         elif tfidf is not None:
-            search_index = TfidfSearchIndex.__new__(TfidfSearchIndex)
-            search_index._store = store
-            search_index._tfidf = tfidf
+            search_index = TfidfSearchIndex.from_state(store, tfidf)
 
         # 4. Create pipeline
         pipeline = cls(store=store, search_index=search_index)
@@ -594,7 +591,7 @@ class Pipeline:
         Returns:
             List of SearchResult for neighboring chunks.
         """
-        if not hasattr(self, "_graph") or self._graph is None:
+        if self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
 
         neighbor_ids = self._graph.neighbors(revision_id, k=k)
@@ -617,7 +614,7 @@ class Pipeline:
         Returns:
             List of dicts with cluster_id, size, and label terms.
         """
-        if not hasattr(self, "_graph") or self._graph is None:
+        if self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
         return self._graph.topics()
 
@@ -636,7 +633,7 @@ class Pipeline:
         Returns:
             List of SearchResult for chunks in the cluster.
         """
-        if not hasattr(self, "_graph") or self._graph is None:
+        if self._graph is None:
             raise ValueError("Graph not built. Call build_graph() first.")
 
         member_ids = self._graph.cluster_members(cluster_id)[:k]
