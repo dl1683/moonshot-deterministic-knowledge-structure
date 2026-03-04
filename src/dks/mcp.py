@@ -347,7 +347,10 @@ class MCPToolHandler:
         handler = handlers.get(name)
         if handler is None:
             return {"error": f"Unknown tool: {name}"}
-        return handler(arguments)
+        try:
+            return handler(arguments)
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def _handle_ingest(self, args: dict[str, Any]) -> dict[str, Any]:
         text = args.get("text", "")

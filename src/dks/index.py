@@ -788,10 +788,10 @@ class SentenceTransformerIndex:
         """Load saved embeddings from disk.
 
         Restores precomputed embeddings, skipping the expensive encoding step.
+        Uses RestrictedUnpickler for safety (blocks arbitrary code execution).
         """
-        import pickle
-        with open(path, "rb") as f:
-            state = pickle.load(f)
+        from .pipeline import _safe_pickle_load
+        state = _safe_pickle_load(path)
         self._texts = state["texts"]
         self._revision_ids = state["revision_ids"]
         self._embeddings = state["embeddings"]

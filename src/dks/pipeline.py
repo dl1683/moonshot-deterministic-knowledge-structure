@@ -501,6 +501,8 @@ class Pipeline:
         # Invalidate stale graph — must rebuild after merge
         # Explorer._graph is a property that reads pipeline._graph via _graph_fn
         self._graph = None
+        # Mark index as dirty — merged store has new revisions not yet indexed
+        self._index_dirty = True
         return result
 
     def rebuild_index(self) -> int:
@@ -754,6 +756,7 @@ class Pipeline:
 
     def scan_contradictions(self, *, k: int = 10, threshold: float = 0.15) -> list[dict[str, Any]]:
         """Scan corpus for potentially contradictory claims."""
+        self._ensure_index_fresh()
         return self._explorer.scan_contradictions(k=k, threshold=threshold)
 
     def evolution(self, topic: str, *, k: int = 20) -> dict[str, Any]:
@@ -828,38 +831,47 @@ class Pipeline:
 
     def reason(self, question, **kwargs):
         """Multi-hop reasoning over the knowledge store."""
+        self._ensure_index_fresh()
         return self._search.reason(question, **kwargs)
 
     def discover(self, seed_query, **kwargs):
         """Discover related chunks through graph traversal."""
+        self._ensure_index_fresh()
         return self._search.discover(seed_query, **kwargs)
 
     def coverage(self, topic, **kwargs):
         """Analyze store coverage for a topic."""
+        self._ensure_index_fresh()
         return self._search.coverage(topic, **kwargs)
 
     def evidence_chain(self, claim, **kwargs):
         """Build cross-document evidence chain."""
+        self._ensure_index_fresh()
         return self._search.evidence_chain(claim, **kwargs)
 
     def query_deep(self, question, **kwargs):
         """Intelligent query decomposition and targeted retrieval."""
+        self._ensure_index_fresh()
         return self._search.query_deep(question, **kwargs)
 
     def synthesize(self, question, **kwargs):
         """Full-stack retrieval and synthesis."""
+        self._ensure_index_fresh()
         return self._search.synthesize(question, **kwargs)
 
     def ask(self, question, **kwargs):
         """Intelligent query routing and answer."""
+        self._ensure_index_fresh()
         return self._search.ask(question, **kwargs)
 
     def timeline(self, topic, **kwargs):
         """Build knowledge timeline for a topic."""
+        self._ensure_index_fresh()
         return self._search.timeline(topic, **kwargs)
 
     def timeline_diff(self, topic, **kwargs):
         """Show how a topic changed between time periods."""
+        self._ensure_index_fresh()
         return self._search.timeline_diff(topic, **kwargs)
 
     def provenance_of(self, result):
@@ -880,28 +892,34 @@ class Pipeline:
 
     def deduplicate(self, **kwargs):
         """Find clusters of near-duplicate chunks."""
+        self._ensure_index_fresh()
         return self._search.deduplicate(**kwargs)
 
     def explain(self, question, result=None, **kwargs):
         """Explain what the search pipeline does for a query."""
+        self._ensure_index_fresh()
         if result is not None:
             return self._search.explain(question, result, **kwargs)
         return self._search.explain(question, **kwargs)
 
     def extract_answer(self, question, results=None, **kwargs):
         """Extract a direct answer from retrieved chunks."""
+        self._ensure_index_fresh()
         return self._search.extract_answer(question, results, **kwargs)
 
     def answer(self, question, **kwargs):
         """Complete answer pipeline: search + extract."""
+        self._ensure_index_fresh()
         return self._search.answer(question, **kwargs)
 
     def contradictions(self, topic, **kwargs):
         """Find contradictory claims in the store."""
+        self._ensure_index_fresh()
         return self._search.contradictions(topic, **kwargs)
 
     def confidence(self, claim, **kwargs):
         """Assess confidence in answers to a question."""
+        self._ensure_index_fresh()
         return self._search.confidence(claim, **kwargs)
 
     # Private method pass-throughs (for test compatibility)
