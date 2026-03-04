@@ -263,7 +263,8 @@ class TestMetadata:
             with open(Path(tmp) / "meta.json") as f:
                 meta = json.load(f)
 
-        assert meta["version"] == "0.5.0"
+        import dks
+        assert meta["version"] == dks.__version__
         assert meta["cores"] == len(pipeline.store.cores)
         assert meta["revisions"] == len(pipeline.store.revisions)
         assert meta["tx_counter"] == pipeline._tx_counter

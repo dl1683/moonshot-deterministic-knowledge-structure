@@ -200,15 +200,11 @@ class TestEmptyCorpusOperations:
         assert isinstance(sources, list)
         assert len(sources) == 0
 
-    def test_quality_report_on_empty_store(self):
-        """quality_report should not crash on empty store."""
+    def test_quality_report_requires_graph(self):
+        """quality_report should raise ValueError without graph."""
         pipe = _make_pipeline()
-        # Need a graph first
-        pipe.rebuild_index()
-        # build_graph needs at least 1 document
-        # So just test that it doesn't crash without a graph
-        # (quality_report requires graph)
-        # Test without graph should raise or return gracefully
+        with pytest.raises(ValueError, match="Graph not built"):
+            pipe.quality_report()
 
     def test_search_after_all_retracted(self):
         """Search should return empty after all content is retracted."""

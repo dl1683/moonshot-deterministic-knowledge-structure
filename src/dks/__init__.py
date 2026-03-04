@@ -1,5 +1,7 @@
 """Deterministic Knowledge Structure — agentic AI memory with deterministic core."""
 
+__version__ = "0.3.1"
+
 from .core import (
     ClaimCore,
     ClaimRevision,

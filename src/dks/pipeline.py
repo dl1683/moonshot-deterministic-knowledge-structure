@@ -36,6 +36,12 @@ from .index import (
 from .resolve import Resolver
 
 
+def _get_version() -> str:
+    """Get DKS version without circular import."""
+    from . import __version__
+    return __version__
+
+
 class Pipeline:
     """End-to-end orchestrator for DKS operations.
 
@@ -239,7 +245,7 @@ class Pipeline:
 
         # 5. Save metadata
         meta: dict[str, Any] = {
-            "version": "0.5.0",
+            "version": _get_version(),
             "cores": len(self.store.cores),
             "revisions": len(self.store.revisions),
             "tx_counter": self._tx_counter,

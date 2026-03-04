@@ -11,7 +11,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidTime
+from .core import ClaimCore, KnowledgeStore, Provenance, TransactionTime, ValidTime, canonicalize_text
 
 
 class Explorer:
@@ -668,6 +668,7 @@ class Explorer:
         """Delete all chunks from a source by retracting their revisions.
 
         Soft delete — data remains as retracted revisions for audit trail.
+        Source name is canonicalized to match slot values.
 
         Args:
             source: The source identifier to delete.
@@ -676,6 +677,7 @@ class Explorer:
         Returns:
             Dict with retracted_count.
         """
+        source = canonicalize_text(source)
         from .core import Provenance as _P
 
         tx_time = self._tx_factory()
@@ -782,6 +784,7 @@ class Explorer:
         Returns:
             Dict with source, chunk_count, and list of chunk previews.
         """
+        source = canonicalize_text(source)
         retracted_cores = self._retracted_cores()
         chunks: list[dict[str, Any]] = []
         rev_cluster = {}
@@ -1597,6 +1600,9 @@ class Explorer:
             Dict with overlap_pairs, unique_to_a, unique_to_b,
             shared_topics, and comparison summary.
         """
+        # Canonicalize source names to match slot values
+        source_a = canonicalize_text(source_a)
+        source_b = canonicalize_text(source_b)
         # Collect chunks per source
         retracted_cores = self._retracted_cores()
         chunks_a: list[tuple[str, str]] = []  # (rid, text)
