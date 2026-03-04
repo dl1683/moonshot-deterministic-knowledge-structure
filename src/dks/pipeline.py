@@ -140,6 +140,8 @@ class Pipeline:
         self._tx_counter = 0
         # Track chunk siblings: source -> [revision_ids in order]
         self._chunk_siblings: dict[str, list[str]] = {}
+        # Dirty flag: set True after retraction ops, triggers auto-rebuild on next search
+        self._index_dirty = False
         # Audit trail
         self._audit = AuditManager()
         # Ingester (delegates ingest operations)
@@ -220,12 +222,20 @@ class Pipeline:
 
     # ---- Search (delegated to SearchEngine) ----
 
+    def _ensure_index_fresh(self) -> None:
+        """Auto-rebuild search index if dirty (e.g., after retraction)."""
+        if self._index_dirty and self._index is not None:
+            self.rebuild_index()
+            self._index_dirty = False
+
     def query(self, question: str, **kwargs) -> list[SearchResult]:
         """Search for relevant claims with temporal filtering."""
+        self._ensure_index_fresh()
         return self._search.query(question, **kwargs)
 
     def query_multi(self, question: str, **kwargs) -> dict[str, list[SearchResult]]:
         """Multi-document retrieval: find relevant chunks across all sources."""
+        self._ensure_index_fresh()
         return self._search.query_multi(question, **kwargs)
 
     def query_exact(self, core_id: str, *, valid_at, tx_id):
@@ -238,6 +248,7 @@ class Pipeline:
 
     def query_with_context(self, question: str, **kwargs) -> list[SearchResult]:
         """Search with automatic context expansion."""
+        self._ensure_index_fresh()
         return self._search.query_with_context(question, **kwargs)
 
     # ---- Persistence ----
@@ -528,6 +539,7 @@ class Pipeline:
         if hasattr(self._index, 'rebuild'):
             self._index.rebuild()
 
+        self._index_dirty = False
         return len(items)
 
     def stats(self) -> dict[str, Any]:
@@ -676,7 +688,10 @@ class Pipeline:
 
     def delete_cluster(self, cluster_id: int, *, reason: str = 'User deleted cluster via interactive review') -> dict[str, Any]:
         """Delete all chunks in a cluster by retracting their revisions."""
-        return self._explorer.delete_cluster(cluster_id, reason=reason)
+        result = self._explorer.delete_cluster(cluster_id, reason=reason)
+        if result.get("retracted_count", 0) > 0:
+            self._index_dirty = True
+        return result
 
     def review_entities(self, *, top_k: int = 50) -> dict[str, Any]:
         """Analyze entities for interactive review."""
@@ -700,7 +715,10 @@ class Pipeline:
 
     def delete_source(self, source: str, *, reason: str = 'User deleted source via interactive review') -> dict[str, Any]:
         """Delete all chunks from a source by retracting."""
-        return self._explorer.delete_source(source, reason=reason)
+        result = self._explorer.delete_source(source, reason=reason)
+        if result.get("retracted_count", 0) > 0:
+            self._index_dirty = True
+        return result
 
     def browse_cluster(self, cluster_id: int, *, limit: int = 20, preview_length: int = 200) -> dict[str, Any]:
         """Browse chunks within a specific cluster."""
