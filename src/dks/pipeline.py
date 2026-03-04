@@ -54,49 +54,50 @@ def _safe_pickle_load(path: str | Path) -> Any:
     import io
     import pickle
 
-    # Allowlist of (module, qualname) pairs
+    # Explicit allowlist of (module, qualname) pairs that DKS actually serializes.
+    # No blanket prefixes — every allowed type is enumerated.
     _ALLOWED_TYPES: set[tuple[str, str]] = {
-        # builtins are handled separately (find_class is not called for them)
-        # numpy
+        # numpy: array reconstruction
         ("numpy", "ndarray"),
         ("numpy", "dtype"),
         ("numpy.core.multiarray", "_reconstruct"),
         ("numpy.core.multiarray", "scalar"),
         ("numpy", "core.multiarray._reconstruct"),
         ("numpy", "core.multiarray.scalar"),
-        # scipy sparse
+        ("numpy", "int64"),
+        ("numpy", "float64"),
+        ("numpy", "float32"),
+        ("numpy", "bool_"),
+        # scipy sparse (TF-IDF matrices)
         ("scipy.sparse._csr", "csr_matrix"),
         ("scipy.sparse.csr", "csr_matrix"),
         ("scipy.sparse._csc", "csc_matrix"),
         ("scipy.sparse.csc", "csc_matrix"),
         ("scipy.sparse", "_csr.csr_matrix"),
         ("scipy.sparse", "_csc.csc_matrix"),
-        # sklearn TF-IDF
+        # sklearn TF-IDF (the only sklearn classes DKS serializes)
         ("sklearn.feature_extraction.text", "TfidfVectorizer"),
         ("sklearn.feature_extraction.text", "TfidfTransformer"),
         ("sklearn.feature_extraction.text", "CountVectorizer"),
+        # sklearn internals used during TfidfVectorizer unpickling
+        ("sklearn.feature_extraction._stop_words", "ENGLISH_STOP_WORDS"),
+        ("sklearn.utils._tags", "Tags"),
         # collections
         ("collections", "OrderedDict"),
         ("collections", "defaultdict"),
-        # copy
-        ("copy", "deepcopy"),
+        # copy/reconstruction
         ("copyreg", "_reconstructor"),
     }
-
-    # Also allow any class under numpy and scipy namespaces
-    _ALLOWED_PREFIXES = ("numpy", "scipy", "sklearn")
 
     class _RestrictedUnpickler(pickle.Unpickler):
         def find_class(self, module: str, name: str) -> Any:
             if (module, name) in _ALLOWED_TYPES:
                 return super().find_class(module, name)
-            if any(module.startswith(prefix) for prefix in _ALLOWED_PREFIXES):
-                return super().find_class(module, name)
             if module == "builtins" and name in (
                 "set", "frozenset", "dict", "list", "tuple",
                 "bytes", "bytearray", "True", "False", "None",
                 "int", "float", "complex", "str", "bool",
-                "slice", "range", "type", "object",
+                "slice", "range",
             ):
                 return super().find_class(module, name)
             raise pickle.UnpicklingError(
