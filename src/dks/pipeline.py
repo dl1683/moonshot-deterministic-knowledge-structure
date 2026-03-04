@@ -42,6 +42,72 @@ def _get_version() -> str:
     return __version__
 
 
+def _safe_pickle_load(path: str | Path) -> Any:
+    """Load a pickle file with a restricted unpickler for safety.
+
+    Only allows types that DKS actually serializes: builtins (dict, list,
+    tuple, set, str, int, float, bool, bytes), numpy arrays, scipy sparse
+    matrices, and sklearn TfidfVectorizer.
+
+    Raises pickle.UnpicklingError if the file contains unexpected types.
+    """
+    import io
+    import pickle
+
+    # Allowlist of (module, qualname) pairs
+    _ALLOWED_TYPES: set[tuple[str, str]] = {
+        # builtins are handled separately (find_class is not called for them)
+        # numpy
+        ("numpy", "ndarray"),
+        ("numpy", "dtype"),
+        ("numpy.core.multiarray", "_reconstruct"),
+        ("numpy.core.multiarray", "scalar"),
+        ("numpy", "core.multiarray._reconstruct"),
+        ("numpy", "core.multiarray.scalar"),
+        # scipy sparse
+        ("scipy.sparse._csr", "csr_matrix"),
+        ("scipy.sparse.csr", "csr_matrix"),
+        ("scipy.sparse._csc", "csc_matrix"),
+        ("scipy.sparse.csc", "csc_matrix"),
+        ("scipy.sparse", "_csr.csr_matrix"),
+        ("scipy.sparse", "_csc.csc_matrix"),
+        # sklearn TF-IDF
+        ("sklearn.feature_extraction.text", "TfidfVectorizer"),
+        ("sklearn.feature_extraction.text", "TfidfTransformer"),
+        ("sklearn.feature_extraction.text", "CountVectorizer"),
+        # collections
+        ("collections", "OrderedDict"),
+        ("collections", "defaultdict"),
+        # copy
+        ("copy", "deepcopy"),
+        ("copyreg", "_reconstructor"),
+    }
+
+    # Also allow any class under numpy and scipy namespaces
+    _ALLOWED_PREFIXES = ("numpy", "scipy", "sklearn")
+
+    class _RestrictedUnpickler(pickle.Unpickler):
+        def find_class(self, module: str, name: str) -> Any:
+            if (module, name) in _ALLOWED_TYPES:
+                return super().find_class(module, name)
+            if any(module.startswith(prefix) for prefix in _ALLOWED_PREFIXES):
+                return super().find_class(module, name)
+            if module == "builtins" and name in (
+                "set", "frozenset", "dict", "list", "tuple",
+                "bytes", "bytearray", "True", "False", "None",
+                "int", "float", "complex", "str", "bool",
+                "slice", "range", "type", "object",
+            ):
+                return super().find_class(module, name)
+            raise pickle.UnpicklingError(
+                f"DKS: Blocked unsafe pickle class: {module}.{name}. "
+                f"Only whitelisted types are allowed during Pipeline.load()."
+            )
+
+    with open(path, "rb") as f:
+        return _RestrictedUnpickler(f).load()
+
+
 class Pipeline:
     """End-to-end orchestrator for DKS operations.
 
@@ -289,7 +355,6 @@ class Pipeline:
             Fully restored Pipeline with store, index, and graph.
         """
         import json
-        import pickle
 
         directory = Path(directory)
 
@@ -311,8 +376,7 @@ class Pipeline:
         if (directory / "tfidf_state.pkl").exists():
             from .index import TfidfIndex
 
-            with open(directory / "tfidf_state.pkl", "rb") as f:
-                tfidf_state = pickle.load(f)
+            tfidf_state = _safe_pickle_load(directory / "tfidf_state.pkl")
 
             tfidf = TfidfIndex.__new__(TfidfIndex)
             tfidf._texts = tfidf_state["texts"]
@@ -320,10 +384,8 @@ class Pipeline:
             tfidf._fitted = tfidf_state["fitted"]
 
             if tfidf._fitted and (directory / "tfidf_vectorizer.pkl").exists():
-                with open(directory / "tfidf_vectorizer.pkl", "rb") as f:
-                    tfidf._vectorizer = pickle.load(f)
-                with open(directory / "tfidf_matrix.pkl", "rb") as f:
-                    tfidf._matrix = pickle.load(f)
+                tfidf._vectorizer = _safe_pickle_load(directory / "tfidf_vectorizer.pkl")
+                tfidf._matrix = _safe_pickle_load(directory / "tfidf_matrix.pkl")
             else:
                 from sklearn.feature_extraction.text import TfidfVectorizer
                 tfidf._vectorizer = TfidfVectorizer()
@@ -346,7 +408,11 @@ class Pipeline:
             except ImportError:
                 dense._model = None
                 dense._dimension = 384
-            dense.load_embeddings(directory / "dense_embeddings.pkl")
+            dense_state = _safe_pickle_load(directory / "dense_embeddings.pkl")
+            dense._texts = dense_state["texts"]
+            dense._revision_ids = dense_state["revision_ids"]
+            dense._embeddings = dense_state["embeddings"]
+            dense._dirty = False
 
         # 3c. Assemble the correct index type
         if index_type == "hybrid" and tfidf is not None and dense is not None:
@@ -375,8 +441,7 @@ class Pipeline:
         if (directory / "graph.pkl").exists():
             from .index import KnowledgeGraph
 
-            with open(directory / "graph.pkl", "rb") as f:
-                graph_state = pickle.load(f)
+            graph_state = _safe_pickle_load(directory / "graph.pkl")
 
             graph = KnowledgeGraph()
             graph._adjacency = graph_state["adjacency"]
@@ -387,8 +452,7 @@ class Pipeline:
 
         # 6. Restore chunk siblings
         if (directory / "chunk_siblings.pkl").exists():
-            with open(directory / "chunk_siblings.pkl", "rb") as f:
-                pipeline._chunk_siblings = pickle.load(f)
+            pipeline._chunk_siblings = _safe_pickle_load(directory / "chunk_siblings.pkl")
             # Update references in sub-modules (they hold refs to the old empty dict)
             pipeline._ingester._chunk_siblings = pipeline._chunk_siblings
             pipeline._search._chunk_siblings = pipeline._chunk_siblings
