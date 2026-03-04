@@ -4864,176 +4864,22 @@ class KnowledgeStore:
                 revision_id
             )
 
+        # Merge active relations, then pending relations (shared logic via helper)
         for relation_id, incoming_relation in sorted(other.relations.items()):
-            existing_relation = merged.relations.get(relation_id)
-            existing_pending_relation = merged._pending_relations.get(relation_id)
-            is_known_identical = (
-                existing_relation == incoming_relation
-                or existing_pending_relation == incoming_relation
+            self._merge_single_relation(
+                merged, other, relation_id, incoming_relation, conflicts,
             )
 
-            source_missing_endpoints = self._missing_relation_endpoints_from_index(
-                revision_ids=other.revisions,
-                incoming_relation=incoming_relation,
-            )
-            merged_missing_endpoints = self._missing_relation_endpoints(
-                merged=merged,
-                incoming_relation=incoming_relation,
-            )
-            missing_endpoints = tuple(
-                sorted(set(source_missing_endpoints).union(merged_missing_endpoints))
-            )
-            if missing_endpoints and not is_known_identical:
-                conflicts.append(
-                    MergeConflict(
-                        code=ConflictCode.ORPHAN_RELATION_ENDPOINT,
-                        entity_id=relation_id,
-                        details=(
-                            "relation references missing revision endpoints: "
-                            + ", ".join(missing_endpoints)
-                        ),
-                    )
-                )
-
-            relation_variants = merged._relation_variants.setdefault(relation_id, {})
-            relation_collision_pairs = merged._relation_collision_pairs.setdefault(
-                relation_id, set()
-            )
-
-            if existing_relation is not None:
-                existing_relation_key = self._relation_payload_sort_key(existing_relation)
-                relation_variants.setdefault(existing_relation_key, existing_relation)
-            if existing_pending_relation is not None:
-                existing_pending_key = self._relation_payload_sort_key(existing_pending_relation)
-                relation_variants.setdefault(existing_pending_key, existing_pending_relation)
-
-            incoming_key = self._relation_payload_sort_key(incoming_relation)
-            for variant_key in sorted(tuple(relation_variants.keys())):
-                if variant_key == incoming_key:
-                    continue
-                pair_key = self._relation_collision_pair_key(variant_key, incoming_key)
-                if pair_key in relation_collision_pairs:
-                    continue
-                relation_collision_pairs.add(pair_key)
-                pair_signatures = tuple(
-                    self._relation_payload_signature(component_key)
-                    for component_key in pair_key
-                )
-                conflicts.append(
-                    MergeConflict(
-                        code=ConflictCode.RELATION_ID_COLLISION,
-                        entity_id=relation_id,
-                        details=(
-                            "incoming relation payload differs for same relation_id: "
-                            f"{pair_signatures[0]} vs {pair_signatures[1]}"
-                        ),
-                    )
-                )
-            relation_variants.setdefault(incoming_key, incoming_relation)
-
-            canonical_relation = relation_variants[min(relation_variants.keys())]
-            canonical_missing_endpoints = self._missing_relation_endpoints(
-                merged=merged,
-                incoming_relation=canonical_relation,
-            )
-            if canonical_missing_endpoints:
-                merged.relations.pop(relation_id, None)
-                merged._pending_relations[relation_id] = canonical_relation
-                continue
-
-            merged.relations[relation_id] = canonical_relation
-            merged._pending_relations.pop(relation_id, None)
-
-        # Process pending relations from other (P1 fix: previously ignored)
         for relation_id, incoming_relation in sorted(other._pending_relations.items()):
+            # Skip if already known-identical from the active relations pass
             if relation_id in merged.relations or relation_id in merged._pending_relations:
-                # Already processed via active relations loop or already known
-                existing_relation = merged.relations.get(relation_id)
+                existing = merged.relations.get(relation_id)
                 existing_pending = merged._pending_relations.get(relation_id)
-                is_known_identical = (
-                    existing_relation == incoming_relation
-                    or existing_pending == incoming_relation
-                )
-                if is_known_identical:
+                if existing == incoming_relation or existing_pending == incoming_relation:
                     continue
-
-            source_missing_endpoints = self._missing_relation_endpoints_from_index(
-                revision_ids=other.revisions,
-                incoming_relation=incoming_relation,
+            self._merge_single_relation(
+                merged, other, relation_id, incoming_relation, conflicts,
             )
-            merged_missing_endpoints = self._missing_relation_endpoints(
-                merged=merged,
-                incoming_relation=incoming_relation,
-            )
-            missing_endpoints = tuple(
-                sorted(set(source_missing_endpoints).union(merged_missing_endpoints))
-            )
-            is_known_identical = (
-                merged.relations.get(relation_id) == incoming_relation
-                or merged._pending_relations.get(relation_id) == incoming_relation
-            )
-            if missing_endpoints and not is_known_identical:
-                conflicts.append(
-                    MergeConflict(
-                        code=ConflictCode.ORPHAN_RELATION_ENDPOINT,
-                        entity_id=relation_id,
-                        details=(
-                            "relation references missing revision endpoints: "
-                            + ", ".join(missing_endpoints)
-                        ),
-                    )
-                )
-
-            relation_variants = merged._relation_variants.setdefault(relation_id, {})
-            relation_collision_pairs = merged._relation_collision_pairs.setdefault(
-                relation_id, set()
-            )
-
-            existing_relation = merged.relations.get(relation_id)
-            existing_pending_relation = merged._pending_relations.get(relation_id)
-            if existing_relation is not None:
-                existing_relation_key = self._relation_payload_sort_key(existing_relation)
-                relation_variants.setdefault(existing_relation_key, existing_relation)
-            if existing_pending_relation is not None:
-                existing_pending_key = self._relation_payload_sort_key(existing_pending_relation)
-                relation_variants.setdefault(existing_pending_key, existing_pending_relation)
-
-            incoming_key = self._relation_payload_sort_key(incoming_relation)
-            for variant_key in sorted(tuple(relation_variants.keys())):
-                if variant_key == incoming_key:
-                    continue
-                pair_key = self._relation_collision_pair_key(variant_key, incoming_key)
-                if pair_key in relation_collision_pairs:
-                    continue
-                relation_collision_pairs.add(pair_key)
-                pair_signatures = tuple(
-                    self._relation_payload_signature(component_key)
-                    for component_key in pair_key
-                )
-                conflicts.append(
-                    MergeConflict(
-                        code=ConflictCode.RELATION_ID_COLLISION,
-                        entity_id=relation_id,
-                        details=(
-                            "incoming relation payload differs for same relation_id: "
-                            f"{pair_signatures[0]} vs {pair_signatures[1]}"
-                        ),
-                    )
-                )
-            relation_variants.setdefault(incoming_key, incoming_relation)
-
-            canonical_relation = relation_variants[min(relation_variants.keys())]
-            canonical_missing_endpoints = self._missing_relation_endpoints(
-                merged=merged,
-                incoming_relation=canonical_relation,
-            )
-            if canonical_missing_endpoints:
-                merged.relations.pop(relation_id, None)
-                merged._pending_relations[relation_id] = canonical_relation
-                continue
-
-            merged.relations[relation_id] = canonical_relation
-            merged._pending_relations.pop(relation_id, None)
 
         # Merge variant/collision histories from other (P2/P3 fix: previously ignored)
         for relation_id, other_variants in other._relation_variants.items():
@@ -5049,6 +4895,99 @@ class KnowledgeStore:
 
         conflicts.sort(key=KnowledgeStore._merge_conflict_sort_key)
         return MergeResult(merged=merged, conflicts=tuple(conflicts))
+
+    def _merge_single_relation(
+        self,
+        merged: "KnowledgeStore",
+        other: "KnowledgeStore",
+        relation_id: str,
+        incoming_relation: "RelationEdge",
+        conflicts: list,
+    ) -> None:
+        """Merge a single relation entry into the merged store.
+
+        Shared logic for both active and pending relation merge passes.
+        Detects orphan endpoints, tracks variants/collisions, and places
+        the canonical relation into active or pending as appropriate.
+        """
+        existing_relation = merged.relations.get(relation_id)
+        existing_pending_relation = merged._pending_relations.get(relation_id)
+        is_known_identical = (
+            existing_relation == incoming_relation
+            or existing_pending_relation == incoming_relation
+        )
+
+        source_missing_endpoints = self._missing_relation_endpoints_from_index(
+            revision_ids=other.revisions,
+            incoming_relation=incoming_relation,
+        )
+        merged_missing_endpoints = self._missing_relation_endpoints(
+            merged=merged,
+            incoming_relation=incoming_relation,
+        )
+        missing_endpoints = tuple(
+            sorted(set(source_missing_endpoints).union(merged_missing_endpoints))
+        )
+        if missing_endpoints and not is_known_identical:
+            conflicts.append(
+                MergeConflict(
+                    code=ConflictCode.ORPHAN_RELATION_ENDPOINT,
+                    entity_id=relation_id,
+                    details=(
+                        "relation references missing revision endpoints: "
+                        + ", ".join(missing_endpoints)
+                    ),
+                )
+            )
+
+        relation_variants = merged._relation_variants.setdefault(relation_id, {})
+        relation_collision_pairs = merged._relation_collision_pairs.setdefault(
+            relation_id, set()
+        )
+
+        if existing_relation is not None:
+            existing_relation_key = self._relation_payload_sort_key(existing_relation)
+            relation_variants.setdefault(existing_relation_key, existing_relation)
+        if existing_pending_relation is not None:
+            existing_pending_key = self._relation_payload_sort_key(existing_pending_relation)
+            relation_variants.setdefault(existing_pending_key, existing_pending_relation)
+
+        incoming_key = self._relation_payload_sort_key(incoming_relation)
+        for variant_key in sorted(tuple(relation_variants.keys())):
+            if variant_key == incoming_key:
+                continue
+            pair_key = self._relation_collision_pair_key(variant_key, incoming_key)
+            if pair_key in relation_collision_pairs:
+                continue
+            relation_collision_pairs.add(pair_key)
+            pair_signatures = tuple(
+                self._relation_payload_signature(component_key)
+                for component_key in pair_key
+            )
+            conflicts.append(
+                MergeConflict(
+                    code=ConflictCode.RELATION_ID_COLLISION,
+                    entity_id=relation_id,
+                    details=(
+                        "incoming relation payload differs for same relation_id: "
+                        f"{pair_signatures[0]} vs {pair_signatures[1]}"
+                    ),
+                )
+            )
+        relation_variants.setdefault(incoming_key, incoming_relation)
+
+        canonical_relation = relation_variants[min(relation_variants.keys())]
+        canonical_missing_endpoints = self._missing_relation_endpoints(
+            merged=merged,
+            incoming_relation=canonical_relation,
+        )
+        if canonical_missing_endpoints:
+            merged.relations.pop(relation_id, None)
+            merged._pending_relations[relation_id] = canonical_relation
+            return
+
+        merged.relations[relation_id] = canonical_relation
+        merged._pending_relations.pop(relation_id, None)
 
     @staticmethod
     def _merge_conflict_journal_tx_ids_from_incoming_merge_content(
