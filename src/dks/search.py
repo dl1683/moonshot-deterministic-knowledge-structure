@@ -117,6 +117,10 @@ class SearchEngine:
                 "No search index configured. "
                 "Set embedding_backend or search_index in Pipeline init."
             )
+        if not question or not question.strip():
+            return []
+        if k < 1:
+            return []
 
         # If re-ranker is configured, retrieve more candidates then re-rank
         if self._reranker is not None:

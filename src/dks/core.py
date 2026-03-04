@@ -3773,6 +3773,10 @@ class KnowledgeStore:
             raise ValueError(
                 f"Invalid status: {status!r}. Must be 'asserted' or 'retracted'."
             )
+        if not isinstance(confidence_bp, int) or confidence_bp < 0 or confidence_bp > 10000:
+            raise ValueError(
+                f"confidence_bp must be an integer in [0, 10000], got {confidence_bp!r}."
+            )
         existing_core = self.cores.get(core.core_id)
         if existing_core is not None and existing_core != core:
             raise ValueError(f"core_id collision: {core.core_id}")

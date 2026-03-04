@@ -1005,7 +1005,7 @@ class Explorer:
 
         # Issue 5: Source imbalance (one source has > 50% of chunks)
         for source, rids in source_chunks.items():
-            fraction = len(rids) / total_chunks
+            fraction = len(rids) / total_chunks if total_chunks > 0 else 0
             if fraction > 0.5 and len(source_chunks) > 1:
                 issues.append({
                     "type": "source_imbalance",
@@ -1035,12 +1035,12 @@ class Explorer:
         # Per-source stats
         per_source: dict[str, dict[str, Any]] = {}
         for source, rids in source_chunks.items():
-            lengths = [chunk_lengths[r] for r in rids]
+            lengths = [chunk_lengths[r] for r in rids if r in chunk_lengths]
             per_source[source] = {
                 "chunks": len(rids),
-                "avg_length": round(sum(lengths) / len(lengths)),
-                "min_length": min(lengths),
-                "max_length": max(lengths),
+                "avg_length": round(sum(lengths) / len(lengths)) if lengths else 0,
+                "min_length": min(lengths) if lengths else 0,
+                "max_length": max(lengths) if lengths else 0,
                 "clusters": len({rev_cluster.get(r) for r in rids if r in rev_cluster}),
             }
 
