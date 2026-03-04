@@ -188,8 +188,8 @@ class Ingester:
             if self._index is not None:
                 self._index.add(revision.revision_id, assertion)
 
-        # Track chunk siblings for context expansion
-        source_name = Path(path).name
+        # Track chunk siblings for context expansion (key must match canonicalized slot value)
+        source_name = canonicalize_text(Path(path).name)
         self._chunk_siblings[source_name] = revision_ids
 
         return revision_ids
@@ -258,8 +258,8 @@ class Ingester:
             if self._index is not None:
                 self._index.add(revision.revision_id, chunk_text)
 
-        # Track siblings for context expansion
-        self._chunk_siblings[source] = revision_ids
+        # Track siblings for context expansion (key must match canonicalized slot value)
+        self._chunk_siblings[canonicalize_text(source)] = revision_ids
 
         return revision_ids
 

@@ -303,6 +303,10 @@ class Explorer:
         revisions, preserving the full audit trail. The chunks will no longer
         appear in search results or entity linking.
 
+        Note: After calling this method, you should call ``rebuild_index()``
+        on the Pipeline to ensure the search index reflects the retracted
+        content. The graph is updated automatically via ``remove_cluster()``.
+
         Args:
             cluster_id: The cluster to delete.
             reason: Reason for deletion (stored in retraction metadata).
@@ -1955,6 +1959,14 @@ class Explorer:
         rev = self.store.revisions.get(revision_id)
         if rev is None:
             raise ValueError(f"Revision {revision_id} not found")
+
+        # Reject annotation on retracted chunks to prevent orphaned annotations
+        retracted = self.store.retracted_core_ids()
+        if rev.core_id in retracted:
+            raise ValueError(
+                f"Cannot annotate retracted revision {revision_id}. "
+                "The target chunk has been retracted."
+            )
 
         slots: dict[str, str] = {
             "target_revision": revision_id,
