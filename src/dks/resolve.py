@@ -120,11 +120,16 @@ class NormalizedResolver:
                     method="normalized",
                 )
 
-        # Substring match (mention is a suffix/prefix of a known entity)
+        # Substring match (mention is a word-boundary subset of a known entity)
         for name, eid in sorted(self._entities.items()):
             if candidates is not None and eid not in candidates:
                 continue
-            if canonical in name or name in canonical:
+            # Require substring to be a full word (avoid "art" matching "smart")
+            canonical_words = set(canonical.split())
+            name_words = set(name.split())
+            if not canonical_words or not name_words:
+                continue
+            if canonical_words <= name_words or name_words <= canonical_words:
                 return ResolutionDecision(
                     surface_form=mention,
                     resolved_entity_id=eid,

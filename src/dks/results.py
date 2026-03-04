@@ -105,8 +105,6 @@ class DeepQueryResult:
         lines = [f"# Context for: {self.question}\n"]
 
         for i, r in enumerate(self.results[:max_chunks]):
-            core_lookup = None
-            # We can't access store from here, so use what we have
             lines.append(f"## Chunk {i+1} (relevance: {r.score:.3f})")
             lines.append(r.text[:1000])
             lines.append("")
