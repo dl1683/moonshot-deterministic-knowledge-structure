@@ -204,6 +204,11 @@ class Pipeline:
             recorded_at=datetime.now(timezone.utc),
         )
 
+    @property
+    def tx_counter(self) -> int:
+        """Current transaction counter value."""
+        return self._tx_counter
+
     def ingest(self, text: str, **kwargs) -> list[str]:
         """Extract claims from text, resolve entities, commit to store, index."""
         return self._ingester.ingest(text, **kwargs)

@@ -232,7 +232,7 @@ class TestTxCounterMonotonicity:
         for i in range(n_ops):
             text = f"Operation {i} with content about item_{i}."
             pipeline.ingest_text(text, source=f"op_{i}.txt")
-            counters.append(pipeline._tx_counter)
+            counters.append(pipeline.tx_counter)
 
         # Must be strictly increasing
         for i in range(1, len(counters)):

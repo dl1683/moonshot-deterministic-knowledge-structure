@@ -220,8 +220,9 @@ class TestTemporalQueryProgression:
         rids = p.ingest_text(
             "The population of Capital City is 500000 people.",
             source="census_2020.txt",
+            valid_time=ValidTime(start=_dt(2020, 1, 1)),
         )
-        tx_after_ingest = p._tx_counter
+        tx_after_ingest = p.tx_counter
 
         # -- Query at current tx sees it --
         results_t1 = index.search(
@@ -235,7 +236,7 @@ class TestTemporalQueryProgression:
 
         # -- Retract the fact (do NOT rebuild_index -- keep vectors for old-tx queries) --
         p.delete_source("census_2020.txt")
-        tx_after_retract = p._tx_counter
+        tx_after_retract = p.tx_counter
 
         # -- Query at OLD tx still sees it (bitemporal: fact was visible then) --
         results_old_tx = index.search(
@@ -262,8 +263,9 @@ class TestTemporalQueryProgression:
         rids_new = p.ingest_text(
             "The population of Capital City is 750000 people according to the 2024 census.",
             source="census_2024.txt",
+            valid_time=ValidTime(start=_dt(2024, 1, 1)),
         )
-        tx_after_update = p._tx_counter
+        tx_after_update = p.tx_counter
 
         # -- Latest tx sees the new version --
         results_latest = index.search(

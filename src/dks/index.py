@@ -30,6 +30,61 @@ class SearchResult:
     text: str
 
 
+def _apply_temporal_filter(
+    store: KnowledgeStore,
+    candidates: list[tuple[str, float, str]],
+    k: int,
+    valid_at: datetime | None,
+    tx_id: int | None,
+) -> list[SearchResult]:
+    """Apply retraction/temporal filtering to search candidates.
+
+    Shared by all search index types to eliminate duplication.
+
+    Args:
+        store: KnowledgeStore for temporal queries.
+        candidates: List of (revision_id, score, text) tuples, pre-sorted by relevance.
+        k: Maximum results to return.
+        valid_at: Temporal filter (requires tx_id too).
+        tx_id: Transaction time cutoff (requires valid_at too).
+
+    Returns:
+        Filtered list of SearchResult.
+    """
+    has_temporal = valid_at is not None and tx_id is not None
+    retracted = store.retracted_core_ids() if not has_temporal else set()
+
+    results: list[SearchResult] = []
+    for revision_id, score, text in candidates:
+        if len(results) >= k:
+            break
+
+        revision = store.revisions.get(revision_id)
+        if revision is None:
+            continue
+
+        if has_temporal:
+            winner = store.query_as_of(
+                revision.core_id,
+                valid_at=valid_at,
+                tx_id=tx_id,
+            )
+            if winner is None or winner.revision_id != revision_id:
+                continue
+        else:
+            if revision.status != "asserted" or revision.core_id in retracted:
+                continue
+
+        results.append(SearchResult(
+            core_id=revision.core_id,
+            revision_id=revision_id,
+            score=score,
+            text=text,
+        ))
+
+    return results
+
+
 @runtime_checkable
 class EmbeddingBackend(Protocol):
     """Protocol for embedding computation backends.
@@ -130,40 +185,12 @@ class SearchIndex:
         # Sort by score descending
         scored.sort(key=lambda x: (-x[0], x[1]))
 
-        # Filter by retraction and temporal visibility
-        has_temporal = valid_at is not None and tx_id is not None
-        retracted = self._store.retracted_core_ids() if not has_temporal else set()
-        results: list[SearchResult] = []
-        for score, revision_id in scored:
-            if len(results) >= k:
-                break
-
-            revision = self._store.revisions.get(revision_id)
-            if revision is None:
-                continue
-
-            if has_temporal:
-                # Temporal filter: query_as_of handles retraction visibility
-                winner = self._store.query_as_of(
-                    revision.core_id,
-                    valid_at=valid_at,
-                    tx_id=tx_id,
-                )
-                if winner is None or winner.revision_id != revision_id:
-                    continue
-            else:
-                # No temporal context: exclude retracted cores (latest view)
-                if revision.status != "asserted" or revision.core_id in retracted:
-                    continue
-
-            results.append(SearchResult(
-                core_id=revision.core_id,
-                revision_id=revision_id,
-                score=score,
-                text=self._texts.get(revision_id, ""),
-            ))
-
-        return results
+        # Convert to (revision_id, score, text) for shared filter
+        candidates = [
+            (rid, sc, self._texts.get(rid, ""))
+            for sc, rid in scored
+        ]
+        return _apply_temporal_filter(self._store, candidates, k, valid_at, tx_id)
 
     @property
     def size(self) -> int:
@@ -352,10 +379,6 @@ class TfidfSearchIndex:
     def rebuild(self) -> None:
         self._tfidf.rebuild()
 
-    def _retracted_cores(self) -> set[str]:
-        """Return set of core_ids that have been retracted."""
-        return self._store.retracted_core_ids()
-
     def search(
         self,
         query: str,
@@ -370,38 +393,7 @@ class TfidfSearchIndex:
 
         # Get more candidates than needed to account for temporal filtering
         raw_results = self._tfidf.search(query, k=k * 3)
-        has_temporal = valid_at is not None and tx_id is not None
-        retracted = self._retracted_cores() if not has_temporal else set()
-
-        results: list[SearchResult] = []
-        for revision_id, score, text in raw_results:
-            if len(results) >= k:
-                break
-
-            revision = self._store.revisions.get(revision_id)
-            if revision is None:
-                continue
-
-            if has_temporal:
-                winner = self._store.query_as_of(
-                    revision.core_id,
-                    valid_at=valid_at,
-                    tx_id=tx_id,
-                )
-                if winner is None or winner.revision_id != revision_id:
-                    continue
-            else:
-                if revision.status != "asserted" or revision.core_id in retracted:
-                    continue
-
-            results.append(SearchResult(
-                core_id=revision.core_id,
-                revision_id=revision_id,
-                score=score,
-                text=text,
-            ))
-
-        return results
+        return _apply_temporal_filter(self._store, raw_results, k, valid_at, tx_id)
 
     @property
     def size(self) -> int:
@@ -839,38 +831,7 @@ class DenseSearchIndex:
             self._dense.rebuild()
 
         raw_results = self._dense.search(query, k=k * 3)
-        has_temporal = valid_at is not None and tx_id is not None
-        retracted = self._store.retracted_core_ids() if not has_temporal else set()
-
-        results: list[SearchResult] = []
-        for revision_id, score, text in raw_results:
-            if len(results) >= k:
-                break
-
-            revision = self._store.revisions.get(revision_id)
-            if revision is None:
-                continue
-
-            if has_temporal:
-                winner = self._store.query_as_of(
-                    revision.core_id,
-                    valid_at=valid_at,
-                    tx_id=tx_id,
-                )
-                if winner is None or winner.revision_id != revision_id:
-                    continue
-            else:
-                if revision.status != "asserted" or revision.core_id in retracted:
-                    continue
-
-            results.append(SearchResult(
-                core_id=revision.core_id,
-                revision_id=revision_id,
-                score=score,
-                text=text,
-            ))
-
-        return results
+        return _apply_temporal_filter(self._store, raw_results, k, valid_at, tx_id)
 
     @property
     def size(self) -> int:
@@ -968,38 +929,9 @@ class HybridSearchIndex:
         for rid, score, text in dense_results:
             text_lookup.setdefault(rid, text)
 
-        # Apply temporal filtering and build results
-        has_temporal = valid_at is not None and tx_id is not None
-        retracted = self._store.retracted_core_ids() if not has_temporal else set()
-        results: list[SearchResult] = []
-        for rid, score in rrf_scores:
-            if len(results) >= k:
-                break
-
-            revision = self._store.revisions.get(rid)
-            if revision is None:
-                continue
-
-            if has_temporal:
-                winner = self._store.query_as_of(
-                    revision.core_id,
-                    valid_at=valid_at,
-                    tx_id=tx_id,
-                )
-                if winner is None or winner.revision_id != rid:
-                    continue
-            else:
-                if revision.status != "asserted" or revision.core_id in retracted:
-                    continue
-
-            results.append(SearchResult(
-                core_id=revision.core_id,
-                revision_id=rid,
-                score=score,
-                text=text_lookup.get(rid, ""),
-            ))
-
-        return results
+        # Apply temporal filtering
+        candidates = [(rid, score, text_lookup.get(rid, "")) for rid, score in rrf_scores]
+        return _apply_temporal_filter(self._store, candidates, k, valid_at, tx_id)
 
     @property
     def size(self) -> int:

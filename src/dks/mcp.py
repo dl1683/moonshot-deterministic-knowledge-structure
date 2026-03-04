@@ -386,7 +386,7 @@ class MCPToolHandler:
 
         k = args.get("k", 5)
         valid_at = _parse_datetime(args.get("valid_at"))
-        tx_id = self._pipeline._tx_counter if valid_at else None
+        tx_id = self._pipeline.tx_counter if valid_at else None
 
         try:
             results = self._pipeline.query(
@@ -446,7 +446,7 @@ class MCPToolHandler:
             "cores": len(store.cores),
             "revisions": len(store.revisions),
             "relations": len(store.relations),
-            "pending_relations": len(store._pending_relations),
+            "pending_relations": len(store.pending_relation_ids()),
         }
 
     def _handle_reason(self, args: dict[str, Any]) -> dict[str, Any]:

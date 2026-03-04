@@ -229,7 +229,7 @@ class Ingester:
             else:
                 return []
 
-        vt = valid_time or ValidTime(start=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        vt = valid_time or ValidTime(start=datetime.now(timezone.utc))
         tt = transaction_time or self._tx_factory()
 
         revision_ids: list[str] = []

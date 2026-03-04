@@ -69,13 +69,13 @@ class TestBasicRoundTrip:
     def test_tx_counter_preserved(self) -> None:
         """tx_counter restores so new transactions don't collide."""
         original = _make_pipeline()
-        orig_tx = original._tx_counter
+        orig_tx = original.tx_counter
 
         with tempfile.TemporaryDirectory() as tmp:
             original.save(tmp)
             loaded = Pipeline.load(tmp)
 
-        assert loaded._tx_counter == orig_tx
+        assert loaded.tx_counter == orig_tx
 
     def test_loaded_pipeline_can_query(self) -> None:
         """Loaded pipeline returns search results for known content."""
@@ -267,7 +267,7 @@ class TestMetadata:
         assert meta["version"] == dks.__version__
         assert meta["cores"] == len(pipeline.store.cores)
         assert meta["revisions"] == len(pipeline.store.revisions)
-        assert meta["tx_counter"] == pipeline._tx_counter
+        assert meta["tx_counter"] == pipeline.tx_counter
         assert meta["index_type"] == "tfidf"
         assert meta["indexed"] == pipeline._index.size
 
@@ -303,7 +303,7 @@ class TestEdgeCases:
 
         assert len(loaded.store.cores) == 0
         assert len(loaded.store.revisions) == 0
-        assert loaded._tx_counter == 0
+        assert loaded.tx_counter == 0
 
     def test_no_search_index(self) -> None:
         """Save/load with no search index configured."""
@@ -342,4 +342,4 @@ class TestEdgeCases:
         )
         assert len(new_ids) >= 1
         # tx_counter should have advanced
-        assert loaded._tx_counter > original._tx_counter
+        assert loaded.tx_counter > original.tx_counter
