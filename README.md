@@ -22,7 +22,7 @@ pipeline.ingest_text("Newton published Principia Mathematica in 1687.", source="
 pipeline.rebuild_index()
 
 # Search
-results = pipeline._search.query("who developed relativity")
+results = pipeline.query("who developed relativity")
 print(results[0].text)  # Einstein developed the theory of relativity...
 
 # Save and load
@@ -96,17 +96,17 @@ DKS is a **complete agentic memory system** built on a deterministic core:
 
 ```
 dks/
-  core.py      Deterministic bitemporal store (~5,300 lines, zero deps)
-  pipeline.py  Thin facade orchestrator (~780 lines)
-  search.py    SearchEngine: search, reasoning, synthesis (~2,950 lines)
-  explore.py   Explorer: profiles, annotations, quality, insights (~2,200 lines)
-  ingest.py    Ingester: extract → resolve → commit → index (~340 lines)
-  index.py     TF-IDF + Dense + Hybrid RRF + KnowledgeGraph (~1,050 lines)
+  core.py      Deterministic bitemporal store (~5,200 lines, zero deps)
+  pipeline.py  Thin facade orchestrator (~900 lines)
+  search.py    SearchEngine: search, reasoning, synthesis (~2,930 lines)
+  explore.py   Explorer: profiles, annotations, quality, insights (~2,250 lines)
+  ingest.py    Ingester: extract → resolve → commit → index (~335 lines)
+  index.py     TF-IDF + Dense + Hybrid RRF + KnowledgeGraph (~1,230 lines)
   extract.py   Extractor Protocol + RegexExtractor + LLMExtractor + PDFExtractor (~515 lines)
-  resolve.py   Resolver Protocol + cascading resolution (~160 lines)
+  resolve.py   Resolver Protocol + cascading resolution (~165 lines)
   mcp.py       MCPToolHandler (25 tools) (~615 lines)
   audit.py     AuditEvent / AuditTrace / AuditManager (~175 lines)
-  results.py   Result dataclasses (~280 lines)
+  results.py   Result dataclasses (~275 lines)
 ```
 
 **58 exported symbols** (26 V1 core + 32 V2/V3 modules). All V1 symbols unchanged.
@@ -151,7 +151,7 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-1004 tests covering:
+1174 tests covering:
 - Identity determinism and Unicode convergence
 - Bitemporal queries and retraction semantics
 - Merge CRDT properties (commutativity, associativity, idempotency) via Hypothesis
@@ -168,7 +168,7 @@ python -m pytest -q
 - **Interval surgery**: DESIGN.md target 6 (overlap resolution for partial valid-time conflicts) is unimplemented.
 - **NumpyIndex**: Brute-force cosine similarity, good for <100K vectors. Swap in FAISS/Annoy for scale.
 - **LLMExtractor**: Requires user-provided `llm_fn` callable. No built-in model inference.
-- **No persistence for search index**: Index is in-memory only. Rebuild after load/merge.
+- **Search index persistence**: Index state is saved/loaded with `Pipeline.save()`/`Pipeline.load()`, but must be rebuilt after `merge()`.
 - **Graph must be rebuilt after merge**: `build_graph()` required after `merge()` for graph-dependent operations.
 
 ## Design Documents
