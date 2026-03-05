@@ -31,10 +31,12 @@ from .core import (
 )
 
 from .extract import (
+    DocxExtractor,
     ExtractionResult,
     Extractor,
     LLMExtractor,
     PDFExtractor,
+    PptxExtractor,
     RegexExtractor,
     TextChunker,
 )
@@ -109,10 +111,12 @@ __all__ = [
     "ValidTime",
     "canonicalize_text",
     # V2 extraction
+    "DocxExtractor",
     "ExtractionResult",
     "Extractor",
     "LLMExtractor",
     "PDFExtractor",
+    "PptxExtractor",
     "RegexExtractor",
     "TextChunker",
     # V2 resolution

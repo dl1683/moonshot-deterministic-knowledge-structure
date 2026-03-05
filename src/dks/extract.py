@@ -509,3 +509,328 @@ class PDFExtractor:
         # Re-merge into paragraphs (single newlines become spaces within paragraphs)
         text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
         return text.strip()
+
+
+class DocxExtractor:
+    """Extract text from Word (.docx) documents and chunk into claims.
+
+    Extracts paragraphs and table content, preserving document structure.
+    Each chunk becomes a ClaimCore with claim_type="document.chunk@v1".
+
+    Requires: pip install python-docx
+    """
+
+    CLAIM_TYPE = "document.chunk@v1"
+
+    def __init__(
+        self,
+        chunker: TextChunker | None = None,
+        *,
+        extract_metadata: bool = True,
+    ) -> None:
+        self._chunker = chunker or TextChunker()
+        self._extract_metadata = extract_metadata
+
+    def extract_docx(self, path: str | Path) -> ExtractionResult:
+        """Read a .docx file and extract chunked claims.
+
+        Args:
+            path: Path to the Word document.
+
+        Returns:
+            ExtractionResult with one ClaimCore per chunk.
+        """
+        try:
+            from docx import Document
+        except ImportError:
+            raise ImportError("python-docx required: pip install python-docx")
+
+        path = Path(path)
+        filename = path.name
+
+        doc = Document(str(path))
+
+        # Extract paragraph text
+        sections: list[str] = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:
+                sections.append(text)
+
+        # Extract table content (row by row)
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                if row_text.strip(" |"):
+                    sections.append(row_text)
+
+        if not sections:
+            return ExtractionResult(
+                claims=(),
+                provenance=(),
+                raw_text="",
+                metadata={"source": filename, "error": "no text extracted"},
+            )
+
+        full_text = "\n\n".join(sections)
+        chunks = self._chunker.chunk(full_text)
+
+        if not chunks:
+            return ExtractionResult(
+                claims=(),
+                provenance=(),
+                raw_text=full_text[:500],
+                metadata={"source": filename, "error": "no chunks produced"},
+            )
+
+        claims: list[ClaimCore] = []
+        provenances: list[Provenance] = []
+
+        for idx, chunk_text in enumerate(chunks):
+            claim = ClaimCore(
+                claim_type=self.CLAIM_TYPE,
+                slots={
+                    "source": canonicalize_text(filename),
+                    "chunk_idx": str(idx),
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            claims.append(claim)
+            provenances.append(Provenance(
+                source=f"docx:{filename}",
+                evidence_ref=chunk_text,
+            ))
+
+        metadata: dict[str, Any] = {
+            "source": filename,
+            "total_paragraphs": len(doc.paragraphs),
+            "total_tables": len(doc.tables),
+            "total_chunks": len(chunks),
+            "total_chars": len(full_text),
+        }
+
+        if self._extract_metadata:
+            cp = doc.core_properties
+            if cp.title:
+                metadata["title"] = cp.title
+            if cp.author:
+                metadata["author"] = cp.author
+            if cp.subject:
+                metadata["subject"] = cp.subject
+
+        return ExtractionResult(
+            claims=tuple(claims),
+            provenance=tuple(provenances),
+            raw_text=full_text[:1000],
+            metadata=metadata,
+        )
+
+    def extract(
+        self,
+        text: str,
+        *,
+        claim_types: list[str] | None = None,
+    ) -> ExtractionResult:
+        """Satisfy Extractor protocol — chunk text directly."""
+        if claim_types and self.CLAIM_TYPE not in claim_types:
+            return ExtractionResult(claims=(), provenance=(), raw_text=text)
+
+        chunks = self._chunker.chunk(text)
+        claims: list[ClaimCore] = []
+        provenances: list[Provenance] = []
+
+        for idx, chunk_text in enumerate(chunks):
+            claim = ClaimCore(
+                claim_type=self.CLAIM_TYPE,
+                slots={
+                    "source": "text_input",
+                    "chunk_idx": str(idx),
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            claims.append(claim)
+            provenances.append(Provenance(
+                source="chunker",
+                evidence_ref=chunk_text,
+            ))
+
+        return ExtractionResult(
+            claims=tuple(claims),
+            provenance=tuple(provenances),
+            raw_text=text[:1000],
+            metadata={"total_chunks": len(chunks)},
+        )
+
+
+class PptxExtractor:
+    """Extract text from PowerPoint (.pptx) presentations and chunk into claims.
+
+    Extracts text from slide shapes (text frames, tables, notes).
+    Each chunk becomes a ClaimCore with claim_type="document.chunk@v1".
+
+    Requires: pip install python-pptx
+    """
+
+    CLAIM_TYPE = "document.chunk@v1"
+
+    def __init__(
+        self,
+        chunker: TextChunker | None = None,
+        *,
+        include_notes: bool = True,
+    ) -> None:
+        self._chunker = chunker or TextChunker()
+        self._include_notes = include_notes
+
+    def extract_pptx(self, path: str | Path) -> ExtractionResult:
+        """Read a .pptx file and extract chunked claims.
+
+        Args:
+            path: Path to the PowerPoint file.
+
+        Returns:
+            ExtractionResult with one ClaimCore per chunk.
+        """
+        try:
+            from pptx import Presentation
+        except ImportError:
+            raise ImportError("python-pptx required: pip install python-pptx")
+
+        path = Path(path)
+        filename = path.name
+
+        prs = Presentation(str(path))
+        slide_texts: list[tuple[int, str]] = []
+
+        for slide_num, slide in enumerate(prs.slides):
+            parts: list[str] = []
+
+            # Extract text from all shapes
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        text = paragraph.text.strip()
+                        if text:
+                            parts.append(text)
+
+                # Extract table content
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        row_text = " | ".join(
+                            cell.text.strip() for cell in row.cells
+                        )
+                        if row_text.strip(" |"):
+                            parts.append(row_text)
+
+            # Extract slide notes
+            if self._include_notes and slide.has_notes_slide:
+                notes_text = slide.notes_slide.notes_text_frame.text.strip()
+                if notes_text:
+                    parts.append(f"[Notes] {notes_text}")
+
+            if parts:
+                slide_texts.append((slide_num, "\n".join(parts)))
+
+        if not slide_texts:
+            return ExtractionResult(
+                claims=(),
+                provenance=(),
+                raw_text="",
+                metadata={"source": filename, "error": "no text extracted"},
+            )
+
+        # Combine slide text with slide markers
+        full_text = ""
+        slide_boundaries: list[tuple[int, int]] = []
+        for slide_num, text in slide_texts:
+            slide_boundaries.append((len(full_text), slide_num))
+            full_text += text + "\n\n"
+        full_text = full_text.strip()
+
+        chunks = self._chunker.chunk(full_text)
+
+        if not chunks:
+            return ExtractionResult(
+                claims=(),
+                provenance=(),
+                raw_text=full_text[:500],
+                metadata={"source": filename, "error": "no chunks produced"},
+            )
+
+        claims: list[ClaimCore] = []
+        provenances: list[Provenance] = []
+
+        for idx, chunk_text in enumerate(chunks):
+            # Find which slide this chunk starts on
+            chunk_start = full_text.find(chunk_text[:100])
+            slide_start = 0
+            if chunk_start >= 0:
+                for offset, snum in slide_boundaries:
+                    if offset <= chunk_start:
+                        slide_start = snum
+
+            claim = ClaimCore(
+                claim_type=self.CLAIM_TYPE,
+                slots={
+                    "source": canonicalize_text(filename),
+                    "chunk_idx": str(idx),
+                    "slide_start": str(slide_start),
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            claims.append(claim)
+            provenances.append(Provenance(
+                source=f"pptx:{filename}",
+                evidence_ref=chunk_text,
+            ))
+
+        metadata: dict[str, Any] = {
+            "source": filename,
+            "total_slides": len(prs.slides),
+            "slides_with_text": len(slide_texts),
+            "total_chunks": len(chunks),
+            "total_chars": len(full_text),
+        }
+
+        return ExtractionResult(
+            claims=tuple(claims),
+            provenance=tuple(provenances),
+            raw_text=full_text[:1000],
+            metadata=metadata,
+        )
+
+    def extract(
+        self,
+        text: str,
+        *,
+        claim_types: list[str] | None = None,
+    ) -> ExtractionResult:
+        """Satisfy Extractor protocol — chunk text directly."""
+        if claim_types and self.CLAIM_TYPE not in claim_types:
+            return ExtractionResult(claims=(), provenance=(), raw_text=text)
+
+        chunks = self._chunker.chunk(text)
+        claims: list[ClaimCore] = []
+        provenances: list[Provenance] = []
+
+        for idx, chunk_text in enumerate(chunks):
+            claim = ClaimCore(
+                claim_type=self.CLAIM_TYPE,
+                slots={
+                    "source": "text_input",
+                    "chunk_idx": str(idx),
+                    "text": canonicalize_text(chunk_text[:200]),
+                },
+            )
+            claims.append(claim)
+            provenances.append(Provenance(
+                source="chunker",
+                evidence_ref=chunk_text,
+            ))
+
+        return ExtractionResult(
+            claims=tuple(claims),
+            provenance=tuple(provenances),
+            raw_text=text[:1000],
+            metadata={"total_chunks": len(chunks)},
+        )

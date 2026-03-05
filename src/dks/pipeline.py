@@ -218,8 +218,16 @@ class Pipeline:
         """Ingest raw text: chunk, commit, index."""
         return self._ingester.ingest_text(text, **kwargs)
 
+    def ingest_docx(self, path: str | Path, **kwargs) -> list[str]:
+        """Ingest a Word (.docx) document. Requires: pip install python-docx"""
+        return self._ingester.ingest_docx(path, **kwargs)
+
+    def ingest_pptx(self, path: str | Path, **kwargs) -> list[str]:
+        """Ingest a PowerPoint (.pptx) presentation. Requires: pip install python-pptx"""
+        return self._ingester.ingest_pptx(path, **kwargs)
+
     def ingest_directory(self, directory: str | Path, **kwargs) -> dict[str, list[str]]:
-        """Ingest files from a directory (recursive by default, supports PDF + text)."""
+        """Ingest files from a directory (recursive, supports PDF/DOCX/PPTX/text)."""
         return self._ingester.ingest_directory(directory, **kwargs)
 
     # ---- Search (delegated to SearchEngine) ----

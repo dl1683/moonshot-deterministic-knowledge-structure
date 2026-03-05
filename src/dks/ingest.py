@@ -20,7 +20,7 @@ from .core import (
     ValidTime,
     canonicalize_text,
 )
-from .extract import Extractor, PDFExtractor, TextChunker
+from .extract import DocxExtractor, Extractor, PDFExtractor, PptxExtractor, TextChunker
 from .index import TemporalSearchIndex
 from .resolve import Resolver
 
@@ -199,6 +199,112 @@ class Ingester:
 
         return revision_ids
 
+    def _ingest_document(
+        self,
+        extraction: "ExtractionResult",
+        path: str | Path,
+        format_prefix: str,
+        *,
+        valid_time: ValidTime | None = None,
+        transaction_time: TransactionTime | None = None,
+        confidence_bp: int = 5000,
+    ) -> list[str]:
+        """Shared logic for ingesting document extraction results (PDF, DOCX, PPTX)."""
+        from .extract import ExtractionResult as _ER  # noqa: F811
+
+        if not extraction.claims:
+            return []
+
+        vt = valid_time or ValidTime(start=datetime.now(timezone.utc), end=None)
+        tt = transaction_time or self._tx_factory()
+
+        revision_ids: list[str] = []
+        for i, claim in enumerate(extraction.claims):
+            prov = extraction.provenance[i] if i < len(extraction.provenance) else Provenance(
+                source=f"{format_prefix}:{Path(path).name}",
+            )
+            assertion = prov.evidence_ref or str(claim.slots)
+
+            revision = self.store.assert_revision(
+                core=claim,
+                assertion=assertion,
+                valid_time=vt,
+                transaction_time=tt,
+                provenance=prov,
+                confidence_bp=confidence_bp,
+                status="asserted",
+            )
+            revision_ids.append(revision.revision_id)
+
+            if self._index is not None:
+                self._index.add(revision.revision_id, assertion)
+
+        source_name = canonicalize_text(Path(path).name)
+        self._chunk_siblings[source_name] = revision_ids
+        return revision_ids
+
+    def ingest_docx(
+        self,
+        path: str | Path,
+        *,
+        valid_time: ValidTime | None = None,
+        transaction_time: TransactionTime | None = None,
+        confidence_bp: int = 5000,
+        chunker: TextChunker | None = None,
+    ) -> list[str]:
+        """Ingest a Word (.docx) document: extract text, chunk, commit, index.
+
+        Requires: pip install python-docx
+
+        Args:
+            path: Path to the .docx file.
+            valid_time: When the facts are true.
+            transaction_time: When ingested (auto-generated if None).
+            confidence_bp: Confidence for extracted claims.
+            chunker: Optional custom chunker.
+
+        Returns:
+            List of revision_ids for all committed chunks.
+        """
+        extractor = DocxExtractor(chunker=chunker)
+        extraction = extractor.extract_docx(path)
+        return self._ingest_document(
+            extraction, path, "docx",
+            valid_time=valid_time, transaction_time=transaction_time,
+            confidence_bp=confidence_bp,
+        )
+
+    def ingest_pptx(
+        self,
+        path: str | Path,
+        *,
+        valid_time: ValidTime | None = None,
+        transaction_time: TransactionTime | None = None,
+        confidence_bp: int = 5000,
+        chunker: TextChunker | None = None,
+    ) -> list[str]:
+        """Ingest a PowerPoint (.pptx) presentation: extract text, chunk, commit, index.
+
+        Requires: pip install python-pptx
+
+        Args:
+            path: Path to the .pptx file.
+            valid_time: When the facts are true.
+            transaction_time: When ingested (auto-generated if None).
+            confidence_bp: Confidence for extracted claims.
+            chunker: Optional custom chunker.
+
+        Returns:
+            List of revision_ids for all committed chunks.
+        """
+        extractor = PptxExtractor(chunker=chunker)
+        extraction = extractor.extract_pptx(path)
+        return self._ingest_document(
+            extraction, path, "pptx",
+            valid_time=valid_time, transaction_time=transaction_time,
+            confidence_bp=confidence_bp,
+        )
+
     def ingest_text(
         self,
         text: str,
@@ -297,7 +403,7 @@ class Ingester:
     ) -> dict[str, list[str]]:
         """Ingest files from a directory, recursively by default.
 
-        Supports PDFs (extracted + chunked) and text files (read + chunked).
+        Supports PDFs, Word (.docx), PowerPoint (.pptx), and text files.
         File type is detected by extension. Binary files and unrecognized
         extensions are skipped.
 
@@ -344,6 +450,22 @@ class Ingester:
             try:
                 if suffix == ".pdf":
                     revision_ids = self.ingest_pdf(
+                        file_path,
+                        valid_time=valid_time,
+                        confidence_bp=confidence_bp,
+                        chunker=chunker,
+                    )
+                    results[rel_path] = revision_ids
+                elif suffix == ".docx":
+                    revision_ids = self.ingest_docx(
+                        file_path,
+                        valid_time=valid_time,
+                        confidence_bp=confidence_bp,
+                        chunker=chunker,
+                    )
+                    results[rel_path] = revision_ids
+                elif suffix == ".pptx":
+                    revision_ids = self.ingest_pptx(
                         file_path,
                         valid_time=valid_time,
                         confidence_bp=confidence_bp,

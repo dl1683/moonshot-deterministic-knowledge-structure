@@ -5,7 +5,7 @@
 ```
 pip install dks               # zero-dependency core
 pip install dks[cli]           # + CLI tool
-pip install dks[pipeline]      # + search (numpy, scikit-learn, PDF extraction)
+pip install dks[pipeline]      # + search (numpy, scikit-learn, PDF/Word/PowerPoint)
 pip install dks[all]           # everything (pipeline + embeddings + LLM + MCP + CLI)
 ```
 
@@ -16,7 +16,7 @@ from dks import Pipeline
 
 pipeline = Pipeline()
 
-# Ingest anything — text, PDFs, entire directories
+# Ingest anything — text, PDFs, Word, PowerPoint, entire directories
 pipeline.ingest_text("Einstein developed relativity in 1905.", source="physics")
 pipeline.ingest_text("Newton published Principia in 1687.", source="physics")
 pipeline.rebuild_index()
@@ -38,6 +38,8 @@ dks ingest ./my-project/
 
 # Ingest specific files
 dks ingest paper.pdf
+dks ingest contract.docx
+dks ingest presentation.pptx
 dks ingest notes.txt --source "research notes"
 
 # Search
@@ -63,6 +65,8 @@ DKS auto-detects file types and handles them appropriately:
 |-------|-------------|
 | **Directory** | Recursively walks all subfolders, ingests every supported file |
 | **PDF** | Text extraction via PyMuPDF, intelligent chunking |
+| **Word** (.docx) | Paragraphs + tables + metadata via python-docx |
+| **PowerPoint** (.pptx) | Slides + shapes + tables + speaker notes via python-pptx |
 | **Code** (.py, .js, .rs, .go, .java, .cpp, ...) | Read as text, chunked, fully searchable |
 | **Docs** (.md, .rst, .txt, .tex, .org) | Read as text, chunked |
 | **Config** (.yaml, .toml, .json, .ini, .env) | Read as text, chunked |
@@ -117,7 +121,7 @@ DKS is a **complete agentic memory system** — not just storage, but the full p
 
 | Layer | Module | What it does |
 |-------|--------|-------------|
-| **Extract** | `dks.extract` | Structured claim extraction (regex patterns, LLM, PDF) |
+| **Extract** | `dks.extract` | Structured claim extraction (regex, LLM, PDF, Word, PowerPoint) |
 | **Resolve** | `dks.resolve` | Entity resolution — map mentions to canonical IDs |
 | **Store** | `dks.core` | Deterministic bitemporal knowledge store (zero deps) |
 | **Search** | `dks.index` | TF-IDF + Dense + Hybrid RRF with temporal filtering |
@@ -141,6 +145,12 @@ pipeline.ingest_text("Your text here...", source="notes.txt")
 
 # PDF
 pipeline.ingest_pdf("paper.pdf")
+
+# Word (.docx) — extracts paragraphs, tables, and document metadata
+pipeline.ingest_docx("contract.docx")
+
+# PowerPoint (.pptx) — extracts slides, shapes, tables, and speaker notes
+pipeline.ingest_pptx("presentation.pptx")
 
 # Entire directory (recursive, all file types)
 pipeline.ingest_directory("./my-project/")
@@ -296,7 +306,7 @@ dks repl
 ## Architecture
 
 ```
-15,400 lines of Python across 12 modules:
+~16,000 lines of Python across 12 modules:
 
 dks/
   core.py      Deterministic bitemporal store (~5,200 lines, zero external deps)
@@ -305,15 +315,15 @@ dks/
   index.py     TF-IDF + Dense + Hybrid RRF + KnowledgeGraph (~1,340 lines)
   pipeline.py  Thin facade orchestrator — 50+ public methods (~890 lines)
   mcp.py       MCPToolHandler — 25 tools for AI agent integration (~615 lines)
-  cli.py       Click-based CLI — ingest, query, explore, serve (~560 lines)
-  extract.py   Extractor Protocol + Regex + LLM + PDF backends (~510 lines)
-  ingest.py    Ingester: extract → resolve → commit → index (~400 lines)
+  cli.py       Click-based CLI — ingest, query, explore, serve (~575 lines)
+  extract.py   Extractor Protocol + Regex + LLM + PDF + DOCX + PPTX (~835 lines)
+  ingest.py    Ingester: extract → resolve → commit → index (~520 lines)
   results.py   Result dataclasses for structured output (~275 lines)
   audit.py     AuditEvent / AuditTrace / AuditManager (~175 lines)
   resolve.py   Resolver Protocol + cascading resolution (~165 lines)
 ```
 
-**59 exported symbols.** Protocol-based backends throughout — swap extractors, embedding models, or resolution strategies without changing a line of pipeline code.
+**61 exported symbols.** Protocol-based backends throughout — swap extractors, embedding models, or resolution strategies without changing a line of pipeline code.
 
 ## Testing
 

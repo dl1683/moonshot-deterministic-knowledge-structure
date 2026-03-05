@@ -1,7 +1,7 @@
 """DKS Command-Line Interface.
 
 Usage:
-    dks ingest <path>          Ingest PDF, text file, or directory
+    dks ingest <path>          Ingest PDF, Word, PowerPoint, text, or directory
     dks query <question>       Search the knowledge base
     dks stats                  Show store statistics
     dks sources                List all ingested sources
@@ -68,10 +68,10 @@ def cli(ctx: click.Context, store: str) -> None:
 @click.pass_context
 def ingest(ctx: click.Context, path: str, source: str | None,
            pattern: str, chunk_size: int, chunk_overlap: int, no_graph: bool) -> None:
-    """Ingest a PDF, text file, or directory of files.
+    """Ingest a file or directory into the knowledge base.
 
-    For directories, recursively ingests all supported files (PDFs + text).
-    Supports 60+ file extensions including code, markdown, config, and data files.
+    Supported formats: PDF, Word (.docx), PowerPoint (.pptx), and 60+ text formats.
+    For directories, recursively ingests all supported files.
     Binary files and unrecognized extensions are automatically skipped.
     """
     store_path = ctx.obj["store"]
@@ -98,6 +98,20 @@ def ingest(ctx: click.Context, path: str, source: str | None,
         from .extract import TextChunker
         chunker = TextChunker(chunk_size=chunk_size, overlap=chunk_overlap)
         rev_ids = pipeline.ingest_pdf(p, chunker=chunker)
+        click.echo(f"{len(rev_ids)} chunks in {time.time() - t0:.1f}s")
+
+    elif p.suffix.lower() == ".docx":
+        click.echo(f"Ingesting Word document: {p.name}")
+        from .extract import TextChunker
+        chunker = TextChunker(chunk_size=chunk_size, overlap=chunk_overlap)
+        rev_ids = pipeline.ingest_docx(p, chunker=chunker)
+        click.echo(f"{len(rev_ids)} chunks in {time.time() - t0:.1f}s")
+
+    elif p.suffix.lower() == ".pptx":
+        click.echo(f"Ingesting PowerPoint: {p.name}")
+        from .extract import TextChunker
+        chunker = TextChunker(chunk_size=chunk_size, overlap=chunk_overlap)
+        rev_ids = pipeline.ingest_pptx(p, chunker=chunker)
         click.echo(f"{len(rev_ids)} chunks in {time.time() - t0:.1f}s")
 
     else:
