@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from .core import (
     ClaimCore,
@@ -21,7 +21,7 @@ from .core import (
     canonicalize_text,
 )
 from .extract import Extractor, PDFExtractor, TextChunker
-from .index import SearchIndex
+from .index import DenseSearchIndex, HybridSearchIndex, SearchIndex, TfidfSearchIndex
 from .resolve import Resolver
 
 
@@ -47,6 +47,14 @@ class Ingester:
         self._index = index
         self._tx_factory = tx_factory
         self._chunk_siblings = chunk_siblings
+
+    @property
+    def chunk_siblings(self) -> dict[str, list[str]]:
+        return self._chunk_siblings
+
+    @chunk_siblings.setter
+    def chunk_siblings(self, value: dict[str, list[str]]) -> None:
+        self._chunk_siblings = value
 
     def ingest(
         self,
@@ -328,7 +336,7 @@ class Ingester:
             )
 
         # Rebuild search index after batch ingestion
-        if hasattr(self._index, 'rebuild'):
+        if isinstance(self._index, (TfidfSearchIndex, DenseSearchIndex, HybridSearchIndex)):
             self._index.rebuild()
 
         return results

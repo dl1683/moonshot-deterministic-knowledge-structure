@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, runtime_checkable, Optional, Any
+from typing import Protocol, runtime_checkable, Any
 
 from collections import deque
 
@@ -165,8 +165,8 @@ class SearchIndex:
         query: str,
         *,
         k: int = 5,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Search for similar content with optional temporal filtering.
 
@@ -456,8 +456,8 @@ class TfidfSearchIndex:
         query: str,
         *,
         k: int = 5,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Search with temporal filtering."""
         if not self._tfidf.fitted:
@@ -1020,8 +1020,8 @@ class DenseSearchIndex:
         query: str,
         *,
         k: int = 5,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Search with temporal filtering."""
         if self._dense.dirty or self._dense.embeddings is None:
@@ -1105,8 +1105,8 @@ class HybridSearchIndex:
         query: str,
         *,
         k: int = 5,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Hybrid search with reciprocal rank fusion."""
         # Get candidates from both systems

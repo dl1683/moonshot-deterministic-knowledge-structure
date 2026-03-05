@@ -24,7 +24,7 @@ import re
 import time as _time
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from .audit import AuditManager
 from .core import KnowledgeStore, Provenance
@@ -97,9 +97,29 @@ class SearchEngine:
         self._entity_decisions_fn = entity_decisions_fn
 
     @property
+    def chunk_siblings(self) -> dict[str, list[str]]:
+        return self._chunk_siblings
+
+    @chunk_siblings.setter
+    def chunk_siblings(self, value: dict[str, list[str]]) -> None:
+        self._chunk_siblings = value
+
+    @property
     def _graph(self) -> Any:
         """Return the current KnowledgeGraph or None."""
         return self._graph_fn()
+
+    def _get_tfidf(self) -> Any:
+        """Extract the TfidfIndex component from the current search index.
+
+        Returns the TfidfIndex if available, None otherwise.
+        """
+        from .index import TfidfSearchIndex, HybridSearchIndex
+        if isinstance(self._index, TfidfSearchIndex):
+            return self._index.tfidf
+        elif isinstance(self._index, HybridSearchIndex):
+            return self._index.tfidf
+        return None
 
     # ---- Basic Search ----
 
@@ -107,8 +127,8 @@ class SearchEngine:
         self,
         question: str,
         *,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
         k: int = 5,
     ) -> list[SearchResult]:
         """Search for relevant claims with temporal filtering.
@@ -155,8 +175,8 @@ class SearchEngine:
         *,
         k: int = 10,
         group_by_source: bool = True,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> dict[str, list[SearchResult]]:
         """Multi-document retrieval: find relevant chunks across all sources.
 
@@ -303,8 +323,8 @@ class SearchEngine:
         *,
         k: int = 5,
         context_window: int = 1,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Search with automatic context expansion.
 
@@ -732,8 +752,8 @@ class SearchEngine:
         k: int = 5,
         hops: int = 2,
         expand_k: int = 3,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> ReasoningResult:
         """Multi-hop retrieval: iteratively expand context to answer complex questions.
 
@@ -832,8 +852,8 @@ class SearchEngine:
         k: int = 5,
         depth: int = 2,
         similarity_threshold: float = 0.15,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Discover related knowledge by traversing the similarity graph.
 
@@ -887,8 +907,8 @@ class SearchEngine:
         topic: str,
         *,
         k: int = 20,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> CoverageReport:
         """Analyze what the store knows about a topic.
 
@@ -935,8 +955,8 @@ class SearchEngine:
         k: int = 5,
         max_chain_length: int = 5,
         min_relevance: float = 0.05,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> "EvidenceChain":
         """Build an evidence chain supporting or refuting a claim.
 
@@ -1054,8 +1074,8 @@ class SearchEngine:
         *,
         k_per_subquery: int = 5,
         max_subqueries: int = 5,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> DeepQueryResult:
         """Intelligent query decomposition and targeted retrieval.
 
@@ -1171,8 +1191,8 @@ class SearchEngine:
         context_window: int = 1,
         hops: int = 2,
         max_context_chars: int = 30000,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> "SynthesisResult":
         """Full-stack retrieval and synthesis for answering complex questions.
 
@@ -1378,8 +1398,8 @@ class SearchEngine:
         *,
         k: int = 10,
         strategy: str = "auto",
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> SynthesisResult:
         """Intelligent adaptive retrieval — the single entry point for all queries.
 
@@ -1513,8 +1533,8 @@ class SearchEngine:
         question: str,
         *,
         k: int = 5,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> SynthesisResult:
         """Factual retrieval: direct search, high precision."""
         results = self.query(question, k=k, valid_at=valid_at, tx_id=tx_id)
@@ -1569,8 +1589,8 @@ class SearchEngine:
         question: str,
         *,
         k: int = 10,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> SynthesisResult:
         """Comparison retrieval: search for both sides, cross-reference."""
         # Extract the two sides of the comparison
@@ -1628,8 +1648,8 @@ class SearchEngine:
         question: str,
         *,
         k: int = 10,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> SynthesisResult:
         """Multi-aspect retrieval: decompose and search each aspect."""
         # Use query_deep for decomposition
@@ -1922,8 +1942,8 @@ class SearchEngine:
         source: str,
         *,
         k: int = 50,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[SearchResult]:
         """Retrieve all chunks from a specific source document.
 
@@ -1993,13 +2013,7 @@ class SearchEngine:
             List of duplicate clusters (each cluster is a list of SearchResult).
             Only returns clusters with 2+ members.
         """
-        from .index import TfidfSearchIndex, HybridSearchIndex
-
-        tfidf = None
-        if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index.tfidf
-        elif isinstance(self._index, HybridSearchIndex):
-            tfidf = self._index.tfidf
+        tfidf = self._get_tfidf()
 
         if tfidf is None or not tfidf.fitted:
             return []
@@ -2387,8 +2401,8 @@ class SearchEngine:
         *,
         k: int = 20,
         similarity_threshold: float = 0.15,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Find potential contradictions in the knowledge base about a topic.
 
@@ -2412,8 +2426,6 @@ class SearchEngine:
               - conflict_signals: list[str] (what triggered the detection)
               - confidence_bp: int (0-10000, how likely this is a real contradiction)
         """
-        from .index import TfidfSearchIndex, HybridSearchIndex
-
         if self._index is None:
             raise ValueError("No search index configured.")
 
@@ -2430,11 +2442,7 @@ class SearchEngine:
             )
 
         # Compute pairwise similarity using TF-IDF
-        tfidf = None
-        if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index.tfidf
-        elif isinstance(self._index, HybridSearchIndex):
-            tfidf = self._index.tfidf
+        tfidf = self._get_tfidf()
 
         pairs_with_similarity: list[tuple[int, int, float]] = []
 
@@ -2538,8 +2546,8 @@ class SearchEngine:
         claim: str,
         *,
         k: int = 10,
-        valid_at: Optional[datetime] = None,
-        tx_id: Optional[int] = None,
+        valid_at: datetime | None = None,
+        tx_id: int | None = None,
         recency_window_years: int = 5,
     ) -> dict[str, Any]:
         """Assess confidence in a claim based on evidence in the store.
@@ -2890,14 +2898,8 @@ class SearchEngine:
         results: list[SearchResult],
     ) -> list[SearchResult]:
         """Re-rank results by relevance to the original question."""
-        from .index import TfidfSearchIndex, HybridSearchIndex
-
         # Get TF-IDF component for re-ranking
-        tfidf = None
-        if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index.tfidf
-        elif isinstance(self._index, HybridSearchIndex):
-            tfidf = self._index.tfidf
+        tfidf = self._get_tfidf()
 
         if tfidf is None:
             return sorted(results, key=lambda r: -r.score)

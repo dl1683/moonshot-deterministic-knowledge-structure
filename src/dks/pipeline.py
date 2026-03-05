@@ -430,8 +430,8 @@ class Pipeline:
         if (directory / "chunk_siblings.pkl").exists():
             pipeline._chunk_siblings = _safe_pickle_load(directory / "chunk_siblings.pkl")
             # Update references in sub-modules (they hold refs to the old empty dict)
-            pipeline._ingester._chunk_siblings = pipeline._chunk_siblings
-            pipeline._search._chunk_siblings = pipeline._chunk_siblings
+            pipeline._ingester.chunk_siblings = pipeline._chunk_siblings
+            pipeline._search.chunk_siblings = pipeline._chunk_siblings
 
         return pipeline
 
@@ -492,16 +492,17 @@ class Pipeline:
             items.append((revision_id, revision.assertion))
 
         # Clear existing index data before rebuilding to prevent duplicates
-        tfidf = getattr(self._index, 'tfidf', None)
-        if tfidf is not None:
-            tfidf.clear()
-        dense = getattr(self._index, 'dense', None)
-        if dense is not None:
-            dense.clear()
+        if isinstance(self._index, HybridSearchIndex):
+            self._index.tfidf.clear()
+            self._index.dense.clear()
+        elif isinstance(self._index, TfidfSearchIndex):
+            self._index.tfidf.clear()
+        elif isinstance(self._index, DenseSearchIndex):
+            self._index.dense.clear()
         self._index.add_batch(items)
 
-        # Rebuild index matrix
-        if hasattr(self._index, 'rebuild'):
+        # Rebuild index matrix (all concrete types except SearchIndex)
+        if isinstance(self._index, (TfidfSearchIndex, DenseSearchIndex, HybridSearchIndex)):
             self._index.rebuild()
 
         self._index_dirty = False
