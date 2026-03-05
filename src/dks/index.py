@@ -127,6 +127,14 @@ class SearchIndex:
         self._vectors: dict[str, list[float]] = {}  # revision_id -> vector
         self._texts: dict[str, str] = {}  # revision_id -> text
 
+    @property
+    def store(self) -> KnowledgeStore:
+        return self._store
+
+    @store.setter
+    def store(self, value: KnowledgeStore) -> None:
+        self._store = value
+
     def add(self, revision_id: str, text: str) -> None:
         """Index a revision's text for search.
 
@@ -394,6 +402,14 @@ class TfidfSearchIndex:
         self._store = store
         self._tfidf = TfidfIndex(**vectorizer_kwargs)
 
+    @property
+    def store(self) -> KnowledgeStore:
+        return self._store
+
+    @store.setter
+    def store(self, value: KnowledgeStore) -> None:
+        self._store = value
+
     def add(self, revision_id: str, text: str) -> None:
         self._tfidf.add(revision_id, text)
 
@@ -422,6 +438,11 @@ class TfidfSearchIndex:
     @property
     def size(self) -> int:
         return self._tfidf.size
+
+    @property
+    def tfidf(self) -> TfidfIndex:
+        """Public access to the underlying TfidfIndex component."""
+        return self._tfidf
 
     @classmethod
     def from_state(cls, store: KnowledgeStore, tfidf: TfidfIndex) -> "TfidfSearchIndex":
@@ -734,6 +755,7 @@ class SentenceTransformerIndex:
             raise ImportError("sentence-transformers required: pip install sentence-transformers")
 
         self._model = SentenceTransformer(model_name)
+        self._model_name = model_name
         self._batch_size = batch_size
         self._dimension = self._model.get_sentence_embedding_dimension()
         self._texts: list[str] = []
@@ -849,7 +871,7 @@ class SentenceTransformerIndex:
             "texts": self._texts,
             "revision_ids": self._revision_ids,
             "embeddings": self._embeddings,
-            "model_name": self._model.model_card_data.model_name if hasattr(self._model, 'model_card_data') else "unknown",
+            "model_name": self._model_name,
             "dimension": self._dimension,
         }
         with open(path, "wb") as f:
@@ -872,6 +894,11 @@ class SentenceTransformerIndex:
     def size(self) -> int:
         return len(self._texts)
 
+    @property
+    def model_name(self) -> str:
+        """Name of the sentence-transformer model."""
+        return self._model_name
+
     def get_state(self) -> dict:
         """Return serializable state for persistence."""
         if self._dirty or self._embeddings is None:
@@ -889,6 +916,7 @@ class SentenceTransformerIndex:
         """Restore from saved state."""
         obj = cls.__new__(cls)
         obj._batch_size = 64
+        obj._model_name = model_name
         obj._texts = state["texts"]
         obj._revision_ids = state["revision_ids"]
         obj._embeddings = state["embeddings"]
@@ -921,6 +949,14 @@ class DenseSearchIndex:
         self._store = store
         self._dense = SentenceTransformerIndex(model_name, **kwargs)
 
+    @property
+    def store(self) -> KnowledgeStore:
+        return self._store
+
+    @store.setter
+    def store(self, value: KnowledgeStore) -> None:
+        self._store = value
+
     def add(self, revision_id: str, text: str) -> None:
         self._dense.add(revision_id, text)
 
@@ -948,6 +984,11 @@ class DenseSearchIndex:
     @property
     def size(self) -> int:
         return self._dense.size
+
+    @property
+    def dense(self) -> SentenceTransformerIndex:
+        """Public access to the underlying SentenceTransformerIndex component."""
+        return self._dense
 
     @classmethod
     def from_state(cls, store: KnowledgeStore, dense: SentenceTransformerIndex) -> "DenseSearchIndex":
@@ -989,6 +1030,14 @@ class HybridSearchIndex:
         self._dense = SentenceTransformerIndex(model_name)
         self._alpha = alpha
         self._rrf_k = rrf_k
+
+    @property
+    def store(self) -> KnowledgeStore:
+        return self._store
+
+    @store.setter
+    def store(self, value: KnowledgeStore) -> None:
+        self._store = value
 
     def add(self, revision_id: str, text: str) -> None:
         self._tfidf.add(revision_id, text)
@@ -1056,6 +1105,26 @@ class HybridSearchIndex:
     @property
     def size(self) -> int:
         return self._tfidf.size
+
+    @property
+    def tfidf(self) -> TfidfIndex:
+        """Public access to the underlying TfidfIndex component."""
+        return self._tfidf
+
+    @property
+    def dense(self) -> SentenceTransformerIndex:
+        """Public access to the underlying SentenceTransformerIndex component."""
+        return self._dense
+
+    @property
+    def alpha(self) -> float:
+        """Dense/TF-IDF fusion weight."""
+        return self._alpha
+
+    @property
+    def rrf_k(self) -> int:
+        """Reciprocal rank fusion constant."""
+        return self._rrf_k
 
     @classmethod
     def from_state(

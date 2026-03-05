@@ -161,7 +161,7 @@ class Pipeline:
             store=self.store,
             index=self._index,
             reranker=self._reranker,
-            graph_fn=lambda: getattr(self, '_graph', None),
+            graph_fn=lambda: self._graph,
             audit=self._audit,
             chunk_siblings=self._chunk_siblings,
             entity_decisions_fn=lambda: self._explorer.get_entity_decisions(),
@@ -169,7 +169,7 @@ class Pipeline:
         # Explorer (delegates browse/profile/annotation/entity/insights operations)
         self._explorer = Explorer(
             store=self.store,
-            graph_fn=lambda: getattr(self, '_graph', None),
+            graph_fn=lambda: self._graph,
             tx_factory=self.next_tx,
             query_fn=self._search.query,
             stats_fn=self.stats,
@@ -287,12 +287,12 @@ class Pipeline:
         dense_component = None
 
         if isinstance(self._index, HybridSearchIndex):
-            tfidf_component = self._index._tfidf
-            dense_component = self._index._dense
+            tfidf_component = self._index.tfidf
+            dense_component = self._index.dense
         elif isinstance(self._index, TfidfSearchIndex):
-            tfidf_component = self._index._tfidf
+            tfidf_component = self._index.tfidf
         elif isinstance(self._index, DenseSearchIndex):
-            dense_component = self._index._dense
+            dense_component = self._index.dense
 
         if tfidf_component is not None:
             tfidf_state = tfidf_component.get_state()
@@ -336,8 +336,8 @@ class Pipeline:
         if isinstance(self._index, HybridSearchIndex):
             meta["index_type"] = "hybrid"
             meta["indexed"] = self._index.size
-            meta["hybrid_alpha"] = self._index._alpha
-            meta["hybrid_rrf_k"] = self._index._rrf_k
+            meta["hybrid_alpha"] = self._index.alpha
+            meta["hybrid_rrf_k"] = self._index.rrf_k
         elif isinstance(self._index, DenseSearchIndex):
             meta["index_type"] = "dense"
             meta["indexed"] = self._index.size
@@ -351,14 +351,7 @@ class Pipeline:
 
         # Save dense model name for restoration
         if dense_component is not None:
-            model = getattr(dense_component, '_model', None)
-            if model is not None:
-                model_name = None
-                card_data = getattr(model, 'model_card_data', None)
-                if card_data and hasattr(card_data, 'model_name'):
-                    model_name = card_data.model_name
-                if model_name:
-                    meta["dense_model_name"] = model_name
+            meta["dense_model_name"] = dense_component.model_name
 
         with open(directory / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
@@ -456,7 +449,7 @@ class Pipeline:
         self.store = result.merged
         # Update store references in all sub-modules
         if self._index is not None:
-            self._index._store = self.store
+            self._index.store = self.store
         self._ingester.store = self.store
         self._search.store = self.store
         self._explorer.store = self.store
@@ -499,11 +492,11 @@ class Pipeline:
             items.append((revision_id, revision.assertion))
 
         # Clear existing index data before rebuilding to prevent duplicates
-        tfidf = getattr(self._index, '_tfidf', None)
+        tfidf = getattr(self._index, 'tfidf', None)
         if tfidf is not None:
             tfidf._texts.clear()
             tfidf._revision_ids.clear()
-        dense = getattr(self._index, '_dense', None)
+        dense = getattr(self._index, 'dense', None)
         if dense is not None:
             dense._texts.clear()
             dense._revision_ids.clear()
@@ -552,9 +545,9 @@ class Pipeline:
         # Get the TF-IDF component from whichever index type we have
         tfidf_component = None
         if isinstance(self._index, TfidfSearchIndex):
-            tfidf_component = self._index._tfidf
+            tfidf_component = self._index.tfidf
         elif isinstance(self._index, HybridSearchIndex):
-            tfidf_component = self._index._tfidf
+            tfidf_component = self._index.tfidf
 
         if tfidf_component is None:
             raise ValueError("Graph building requires TfidfSearchIndex or HybridSearchIndex.")
@@ -574,7 +567,7 @@ class Pipeline:
     @property
     def graph(self) -> KnowledgeGraph | None:
         """Access the knowledge graph (None if not built)."""
-        return getattr(self, "_graph", None)
+        return self._graph
 
     def neighbors(
         self,
