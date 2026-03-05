@@ -21,7 +21,7 @@ from .core import (
     canonicalize_text,
 )
 from .extract import Extractor, PDFExtractor, TextChunker
-from .index import DenseSearchIndex, HybridSearchIndex, SearchIndex, TemporalSearchIndex, TfidfSearchIndex
+from .index import TemporalSearchIndex
 from .resolve import Resolver
 
 
@@ -333,8 +333,10 @@ class Ingester:
             )
 
         # Rebuild search index after batch ingestion.
-        # SearchIndex embeds on add(), so rebuild is only needed for deferred-build types.
-        if isinstance(self._index, (TfidfSearchIndex, DenseSearchIndex, HybridSearchIndex)):
+        # All TemporalSearchIndex types implement rebuild() — it's a no-op for
+        # SearchIndex (which embeds eagerly on add()) and triggers matrix/embedding
+        # rebuild for TF-IDF and dense types.
+        if self._index is not None:
             self._index.rebuild()
 
         return results

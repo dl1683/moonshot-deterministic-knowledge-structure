@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .audit import AuditManager
-from .core import KnowledgeStore, Provenance
-from .index import SearchResult
+from .core import KnowledgeStore
+from .index import SearchResult, TemporalSearchIndex
 from .results import CoverageReport, DeepQueryResult, EvidenceChain, QueryFacet, ReasoningResult, SynthesisResult
 
 # Universal English stop words — minimal set used across all search methods.
@@ -81,7 +81,7 @@ class SearchEngine:
     def __init__(
         self,
         store: KnowledgeStore,
-        index: Any,
+        index: TemporalSearchIndex | None,
         reranker: Any,
         graph_fn: Callable[[], Any],
         audit: AuditManager,
