@@ -32,6 +32,8 @@ loaded = Pipeline.load("my_knowledge")
 
 ## CLI — Your Knowledge Base from the Terminal
 
+Install with `pip install dks[cli,pipeline]` for full CLI + document ingestion support.
+
 ```bash
 # Ingest an entire repository (recursive, 60+ file types)
 dks ingest ./my-project/

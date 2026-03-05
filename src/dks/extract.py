@@ -10,6 +10,8 @@ Includes:
 - LLMExtractor: LLM-backed open-domain extraction
 - TextChunker: Smart text splitting with overlap for document ingestion
 - PDFExtractor: PDF text extraction + chunking via PyMuPDF
+- DocxExtractor: Word (.docx) extraction via python-docx
+- PptxExtractor: PowerPoint (.pptx) extraction via python-pptx
 """
 from __future__ import annotations
 
@@ -610,13 +612,16 @@ class DocxExtractor:
         }
 
         if self._extract_metadata:
-            cp = doc.core_properties
-            if cp.title:
-                metadata["title"] = cp.title
-            if cp.author:
-                metadata["author"] = cp.author
-            if cp.subject:
-                metadata["subject"] = cp.subject
+            try:
+                cp = doc.core_properties
+                if cp.title:
+                    metadata["title"] = cp.title
+                if cp.author:
+                    metadata["author"] = cp.author
+                if cp.subject:
+                    metadata["subject"] = cp.subject
+            except (AttributeError, KeyError, ValueError):
+                pass
 
         return ExtractionResult(
             claims=tuple(claims),

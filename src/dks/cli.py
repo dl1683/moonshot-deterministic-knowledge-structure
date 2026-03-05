@@ -31,7 +31,8 @@ def _load_pipeline(store_path: str) -> Pipeline:
     if p.exists() and (p / "store.json").exists():
         click.echo(f"Loading state from {store_path}...")
         return Pipeline.load(store_path)
-    return Pipeline(store=KnowledgeStore(), search_index=TfidfSearchIndex(KnowledgeStore()))
+    store = KnowledgeStore()
+    return Pipeline(store=store, search_index=TfidfSearchIndex(store))
 
 
 def _save_pipeline(pipeline: Pipeline, store_path: str) -> None:
@@ -84,6 +85,8 @@ def ingest(ctx: click.Context, path: str, source: str | None,
 
     t0 = time.time()
 
+    needs_rebuild = True
+
     if p.is_dir():
         click.echo(f"Ingesting directory: {path} (pattern: {pattern})")
         results = pipeline.ingest_directory(
@@ -92,6 +95,7 @@ def ingest(ctx: click.Context, path: str, source: str | None,
         )
         total_chunks = sum(len(v) for v in results.values())
         click.echo(f"\n{len(results)} files, {total_chunks} chunks in {time.time() - t0:.1f}s")
+        needs_rebuild = False  # ingest_directory rebuilds internally
 
     elif p.suffix.lower() == ".pdf":
         click.echo(f"Ingesting PDF: {p.name}")
@@ -123,7 +127,8 @@ def ingest(ctx: click.Context, path: str, source: str | None,
                                        chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         click.echo(f"{len(rev_ids)} chunks in {time.time() - t0:.1f}s")
 
-    pipeline.rebuild_index()
+    if needs_rebuild:
+        pipeline.rebuild_index()
 
     if not no_graph:
         click.echo("Building knowledge graph...")

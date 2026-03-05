@@ -158,46 +158,11 @@ class Ingester:
         """
         pdf_extractor = PDFExtractor(chunker=chunker)
         extraction = pdf_extractor.extract_pdf(path)
-
-        if not extraction.claims:
-            return []
-
-        vt = valid_time or ValidTime(
-            start=datetime.now(timezone.utc),
-            end=None,
+        return self._ingest_document(
+            extraction, path, "pdf",
+            valid_time=valid_time, transaction_time=transaction_time,
+            confidence_bp=confidence_bp,
         )
-        tt = transaction_time or self._tx_factory()
-
-        revision_ids: list[str] = []
-
-        for i, claim in enumerate(extraction.claims):
-            prov = extraction.provenance[i] if i < len(extraction.provenance) else Provenance(
-                source=f"pdf:{Path(path).name}",
-            )
-
-            # Use full chunk text as the assertion for search
-            assertion = prov.evidence_ref or str(claim.slots)
-
-            revision = self.store.assert_revision(
-                core=claim,
-                assertion=assertion,
-                valid_time=vt,
-                transaction_time=tt,
-                provenance=prov,
-                confidence_bp=confidence_bp,
-                status="asserted",
-            )
-            revision_ids.append(revision.revision_id)
-
-            # Index the chunk text for search
-            if self._index is not None:
-                self._index.add(revision.revision_id, assertion)
-
-        # Track chunk siblings for context expansion (key must match canonicalized slot value)
-        source_name = canonicalize_text(Path(path).name)
-        self._chunk_siblings[source_name] = revision_ids
-
-        return revision_ids
 
     def _ingest_document(
         self,
@@ -210,8 +175,6 @@ class Ingester:
         confidence_bp: int = 5000,
     ) -> list[str]:
         """Shared logic for ingesting document extraction results (PDF, DOCX, PPTX)."""
-        from .extract import ExtractionResult as _ER  # noqa: F811
-
         if not extraction.claims:
             return []
 
@@ -239,7 +202,8 @@ class Ingester:
             if self._index is not None:
                 self._index.add(revision.revision_id, assertion)
 
-        source_name = canonicalize_text(Path(path).name)
+        # Use full path string as sibling key to avoid collisions from same-name files
+        source_name = canonicalize_text(str(Path(path)))
         self._chunk_siblings[source_name] = revision_ids
         return revision_ids
 
@@ -494,7 +458,7 @@ class Ingester:
                 else:
                     skipped += 1
                     continue
-            except (ValueError, OSError, RuntimeError) as e:
+            except (ValueError, OSError, RuntimeError, ImportError) as e:
                 errors[rel_path] = str(e)
                 if progress:
                     print(
