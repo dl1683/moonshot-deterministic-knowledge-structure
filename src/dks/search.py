@@ -28,7 +28,7 @@ from typing import Any, Callable
 
 from .audit import AuditManager
 from .core import KnowledgeStore, Provenance
-from .index import KnowledgeGraph, SearchIndex, SearchResult
+from .index import SearchResult
 from .results import CoverageReport, DeepQueryResult, EvidenceChain, QueryFacet, ReasoningResult, SynthesisResult
 
 # Universal English stop words — minimal set used across all search methods.

@@ -21,7 +21,7 @@ from .core import (
     canonicalize_text,
 )
 from .extract import Extractor, PDFExtractor, TextChunker
-from .index import DenseSearchIndex, HybridSearchIndex, SearchIndex, TfidfSearchIndex
+from .index import DenseSearchIndex, HybridSearchIndex, SearchIndex, TemporalSearchIndex, TfidfSearchIndex
 from .resolve import Resolver
 
 
@@ -37,7 +37,7 @@ class Ingester:
         store: KnowledgeStore,
         extractor: Extractor | None,
         resolver: Resolver | None,
-        index: SearchIndex | None,
+        index: TemporalSearchIndex | None,
         tx_factory: Callable[[], TransactionTime],
         chunk_siblings: dict[str, list[str]],
     ) -> None:

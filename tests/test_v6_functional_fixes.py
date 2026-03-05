@@ -19,7 +19,7 @@ from dks import (
     ValidTime,
     TransactionTime,
 )
-from dks.index import NumpyIndex, SearchIndex, TfidfSearchIndex
+from dks.index import DenseSearchIndex, HybridSearchIndex, NumpyIndex, SearchIndex, TemporalSearchIndex, TfidfSearchIndex
 
 
 def _dt(year: int, month: int = 1, day: int = 1) -> datetime:
@@ -162,3 +162,30 @@ class TestIngestTextConsistency:
             results = index.search(rev.assertion[:100], k=5)
             found_ids = [r.revision_id for r in results]
             assert rid in found_ids, f"Revision {rid} not found when searching for its own assertion"
+
+
+# ---- TemporalSearchIndex Protocol conformance ----
+
+
+class TestTemporalSearchIndexProtocol:
+    """All concrete index types must satisfy the TemporalSearchIndex Protocol."""
+
+    def test_search_index_satisfies_protocol(self) -> None:
+        store = KnowledgeStore()
+        idx = SearchIndex(store, NumpyIndex(dimension=32))
+        assert isinstance(idx, TemporalSearchIndex)
+
+    def test_tfidf_search_index_satisfies_protocol(self) -> None:
+        store = KnowledgeStore()
+        idx = TfidfSearchIndex(store)
+        assert isinstance(idx, TemporalSearchIndex)
+
+    def test_dense_search_index_class_has_protocol_methods(self) -> None:
+        """DenseSearchIndex has all Protocol methods (no runtime instance without sentence-transformers)."""
+        required = {"add", "add_batch", "search", "clear", "rebuild", "size"}
+        assert required.issubset(set(dir(DenseSearchIndex)))
+
+    def test_hybrid_search_index_class_has_protocol_methods(self) -> None:
+        """HybridSearchIndex has all Protocol methods (no runtime instance without sentence-transformers)."""
+        required = {"add", "add_batch", "search", "clear", "rebuild", "size"}
+        assert required.issubset(set(dir(HybridSearchIndex)))

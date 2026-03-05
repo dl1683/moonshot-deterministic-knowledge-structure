@@ -31,6 +31,7 @@ from .index import (
     KnowledgeGraph,
     SearchIndex,
     SearchResult,
+    TemporalSearchIndex,
     TfidfSearchIndex,
 )
 from .resolve import Resolver
@@ -128,13 +129,13 @@ class Pipeline:
         resolver: Resolver | None = None,
         embedding_backend: EmbeddingBackend | None = None,
         *,
-        search_index: TfidfSearchIndex | DenseSearchIndex | HybridSearchIndex | SearchIndex | None = None,
+        search_index: TemporalSearchIndex | None = None,
         reranker: CrossEncoderReranker | None = None,
     ) -> None:
         self.store = store or KnowledgeStore()
         self._extractor = extractor
         self._resolver = resolver
-        self._index: TfidfSearchIndex | DenseSearchIndex | HybridSearchIndex | SearchIndex | None = search_index
+        self._index: TemporalSearchIndex | None = search_index
         if self._index is None and embedding_backend is not None:
             self._index = SearchIndex(self.store, embedding_backend)
         self._reranker = reranker
