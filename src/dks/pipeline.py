@@ -52,7 +52,6 @@ def _safe_pickle_load(path: str | Path) -> Any:
 
     Raises pickle.UnpicklingError if the file contains unexpected types.
     """
-    import io
     import pickle
 
     # Explicit allowlist of (module, qualname) pairs that DKS actually serializes.

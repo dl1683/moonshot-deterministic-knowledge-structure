@@ -546,8 +546,6 @@ class SearchEngine:
         # For bigrams: require IDF band + positive PMI
         # PMI(w1, w2) = log(P(w1,w2) / (P(w1) * P(w2)))
         # Positive PMI means the words co-occur more than chance
-        total_tokens = sum(len(t) for t in chunk_tokens.values())
-        total_bigrams = max(total_tokens - n_chunks, 1)  # approximate
 
         # For bigrams, also track source-document frequency
         # (a bigram only from one doc's boilerplate isn't a real entity)
