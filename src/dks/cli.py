@@ -61,14 +61,19 @@ def cli(ctx: click.Context, store: str) -> None:
 @cli.command()
 @click.argument("path")
 @click.option("--source", default=None, help="Source name (default: filename)")
-@click.option("--pattern", default="*.pdf", help="Glob pattern for directories")
+@click.option("--pattern", default="**/*", help="Glob pattern for directories (default: recursive)")
 @click.option("--chunk-size", default=800, help="Characters per chunk")
 @click.option("--chunk-overlap", default=150, help="Overlap between chunks")
 @click.option("--no-graph", is_flag=True, help="Skip building knowledge graph")
 @click.pass_context
 def ingest(ctx: click.Context, path: str, source: str | None,
            pattern: str, chunk_size: int, chunk_overlap: int, no_graph: bool) -> None:
-    """Ingest a PDF, text file, or directory of files."""
+    """Ingest a PDF, text file, or directory of files.
+
+    For directories, recursively ingests all supported files (PDFs + text).
+    Supports 60+ file extensions including code, markdown, config, and data files.
+    Binary files and unrecognized extensions are automatically skipped.
+    """
     store_path = ctx.obj["store"]
     pipeline = _load_pipeline(store_path)
     p = Path(path)
@@ -81,7 +86,10 @@ def ingest(ctx: click.Context, path: str, source: str | None,
 
     if p.is_dir():
         click.echo(f"Ingesting directory: {path} (pattern: {pattern})")
-        results = pipeline.ingest_directory(p, pattern=pattern, progress=True)
+        results = pipeline.ingest_directory(
+            p, pattern=pattern, progress=True,
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        )
         total_chunks = sum(len(v) for v in results.values())
         click.echo(f"\n{len(results)} files, {total_chunks} chunks in {time.time() - t0:.1f}s")
 

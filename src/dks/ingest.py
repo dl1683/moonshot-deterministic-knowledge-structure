@@ -268,67 +268,123 @@ class Ingester:
 
         return revision_ids
 
+    # File extensions treated as text (read with UTF-8, chunked, indexed).
+    _TEXT_EXTENSIONS: frozenset[str] = frozenset({
+        ".txt", ".md", ".rst", ".csv", ".tsv", ".json", ".jsonl",
+        ".xml", ".html", ".htm", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h",
+        ".hpp", ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".kt",
+        ".scala", ".r", ".jl", ".lua", ".sh", ".bash", ".zsh", ".ps1",
+        ".bat", ".sql", ".graphql", ".proto", ".tf", ".dockerfile",
+        ".makefile", ".cmake", ".gradle", ".sbt",
+        ".css", ".scss", ".less", ".sass",
+        ".tex", ".bib", ".org", ".adoc",
+        ".env", ".gitignore", ".dockerignore", ".editorconfig",
+        ".log", ".diff", ".patch",
+    })
+
     def ingest_directory(
         self,
         directory: str | Path,
         *,
-        pattern: str = "*.pdf",
+        pattern: str = "**/*",
         valid_time: ValidTime | None = None,
         confidence_bp: int = 5000,
         chunker: TextChunker | None = None,
+        chunk_size: int = 800,
+        chunk_overlap: int = 150,
         progress: bool = True,
     ) -> dict[str, list[str]]:
-        """Ingest all PDFs in a directory.
+        """Ingest files from a directory, recursively by default.
+
+        Supports PDFs (extracted + chunked) and text files (read + chunked).
+        File type is detected by extension. Binary files and unrecognized
+        extensions are skipped.
 
         Args:
-            directory: Path to directory containing PDFs.
-            pattern: Glob pattern for files (default: *.pdf).
+            directory: Path to directory.
+            pattern: Glob pattern (default: '**/*' for recursive).
+                     Use '*.pdf' for top-level PDFs only.
             valid_time: When the facts are true.
             confidence_bp: Confidence for extracted claims.
-            chunker: Optional custom chunker.
+            chunker: Optional custom chunker (for PDFs).
+            chunk_size: Characters per chunk (for text files).
+            chunk_overlap: Overlap between chunks (for text files).
             progress: Print progress to stderr.
 
         Returns:
-            Dict mapping filename -> list of revision_ids.
+            Dict mapping relative path -> list of revision_ids.
         """
         directory = Path(directory)
-        pdf_files = sorted(directory.glob(pattern))
+        all_files = sorted(f for f in directory.glob(pattern) if f.is_file())
 
-        if not pdf_files:
+        if not all_files:
             return {}
 
         results: dict[str, list[str]] = {}
         errors: dict[str, str] = {}
+        skipped = 0
 
-        for i, pdf_path in enumerate(pdf_files):
+        for i, file_path in enumerate(all_files):
+            suffix = file_path.suffix.lower()
+            # Compute relative path for display and source tracking
+            try:
+                rel_path = str(file_path.relative_to(directory))
+            except ValueError:
+                rel_path = file_path.name
+
             if progress:
                 print(
-                    f"\r  [{i+1}/{len(pdf_files)}] {pdf_path.name[:60]}...",
+                    f"\r  [{i+1}/{len(all_files)}] {rel_path[:60]}...",
                     end="",
                     file=sys.stderr,
                     flush=True,
                 )
 
             try:
-                revision_ids = self.ingest_pdf(
-                    pdf_path,
-                    valid_time=valid_time,
-                    confidence_bp=confidence_bp,
-                    chunker=chunker,
-                )
-                results[pdf_path.name] = revision_ids
+                if suffix == ".pdf":
+                    revision_ids = self.ingest_pdf(
+                        file_path,
+                        valid_time=valid_time,
+                        confidence_bp=confidence_bp,
+                        chunker=chunker,
+                    )
+                    results[rel_path] = revision_ids
+                elif suffix in self._TEXT_EXTENSIONS or suffix == "":
+                    # Read as text, skip files that fail UTF-8 decode
+                    try:
+                        text = file_path.read_text(encoding="utf-8")
+                    except (UnicodeDecodeError, PermissionError):
+                        skipped += 1
+                        continue
+                    if not text.strip():
+                        skipped += 1
+                        continue
+                    revision_ids = self.ingest_text(
+                        text,
+                        source=rel_path,
+                        valid_time=valid_time,
+                        confidence_bp=confidence_bp,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                    )
+                    results[rel_path] = revision_ids
+                else:
+                    skipped += 1
+                    continue
             except (ValueError, OSError, RuntimeError) as e:
-                errors[pdf_path.name] = str(e)
+                errors[rel_path] = str(e)
                 if progress:
                     print(
-                        f"\n  ERROR: {pdf_path.name}: {e}",
+                        f"\n  ERROR: {rel_path}: {e}",
                         file=sys.stderr,
                     )
 
         if progress:
             total_chunks = sum(len(v) for v in results.values())
             print(
-                f"\n  Done: {len(results)} files, {total_chunks} chunks, {len(errors)} errors",
+                f"\n  Done: {len(results)} files, {total_chunks} chunks, "
+                f"{skipped} skipped, {len(errors)} errors",
                 file=sys.stderr,
             )
 

@@ -219,7 +219,7 @@ class Pipeline:
         return self._ingester.ingest_text(text, **kwargs)
 
     def ingest_directory(self, directory: str | Path, **kwargs) -> dict[str, list[str]]:
-        """Ingest all PDFs in a directory."""
+        """Ingest files from a directory (recursive by default, supports PDF + text)."""
         return self._ingester.ingest_directory(directory, **kwargs)
 
     # ---- Search (delegated to SearchEngine) ----
