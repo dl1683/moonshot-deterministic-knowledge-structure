@@ -491,16 +491,9 @@ class Pipeline:
                 continue
             items.append((revision_id, revision.assertion))
 
-        # Clear existing index data before rebuilding to prevent duplicates
-        if isinstance(self._index, HybridSearchIndex):
-            self._index.tfidf.clear()
-            self._index.dense.clear()
-        elif isinstance(self._index, TfidfSearchIndex):
-            self._index.tfidf.clear()
-        elif isinstance(self._index, DenseSearchIndex):
-            self._index.dense.clear()
-        elif isinstance(self._index, SearchIndex):
-            self._index.clear()
+        # Clear existing index data before rebuilding to prevent duplicates.
+        # All index types implement clear() via TemporalSearchIndex Protocol.
+        self._index.clear()
         self._index.add_batch(items)
 
         # Rebuild index (all types)
