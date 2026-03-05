@@ -850,10 +850,10 @@ class Pipeline:
 
     def explain(self, question, result=None, **kwargs):
         """Explain what the search pipeline does for a query."""
+        if result is None:
+            raise ValueError("result is required for explain()")
         self._ensure_index_fresh()
-        if result is not None:
-            return self._search.explain(question, result, **kwargs)
-        return self._search.explain(question, **kwargs)
+        return self._search.explain(question, result, **kwargs)
 
     def extract_answer(self, question, results=None, **kwargs):
         """Extract a direct answer from retrieved chunks."""
