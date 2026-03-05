@@ -1,83 +1,67 @@
 # Design Document
 
+Last updated: 2026-03-05 (v0.3.7)
+
 ## Canonical Objective
 
 Define a deterministic, AI-native structure for factual memory where paraphrases converge to the same semantic identity without collapsing near-neighbor facts.
 
-Working name: Deterministic Semantic Fact Graph (`DSFG`).
+Working name: Deterministic Knowledge Structure (`DKS`).
 
 ## Design Targets (V1 Scope)
 
-The V1 implementation covers 10 design iterations:
+1. **Semantic Identity** — Canonicalized claim identity via SHA-256 hashing of normalized text (`core_id`). Unicode NFC normalization + zero-width character stripping.
+2. **Relation Algebra** — Deterministic relation edges (`relation_id`) for typed relationships between revisions, with symmetric endpoint handling.
+3. **Bitemporal Revision** — Dual-time revision semantics with `ValidTime` (when fact was true) and `TransactionTime` (when recorded). Deterministic supersession, retraction, and as-of/tx-window/transition query surfaces.
+4. **Provenance & Confidence** — Source tracking via `Provenance` (source + evidence_ref). Confidence in basis points (0-10000). Both survive serialization round-trips.
+5. **Deterministic Merge** — CRDT-style merge with conflict classification (competing revisions, ID collisions, orphan relations). Pending relation transfer, deferred orphan replay, variant/collision history transfer. Proven commutative, associative, and idempotent via Hypothesis.
+6. **Snapshot Persistence** — Canonical JSON serialization with schema version, integrity checksum, preflight validation, referential integrity checks, and fail-closed deserialization.
+7. **State Fingerprint** — Composed deterministic digest from all projection surfaces (as-of, tx-window, transition), with canonical serialization/deserialization round-trip.
 
-1. **Semantic Identity** — Canonicalized claim identity via SHA-256 hashing of normalized text (`core_id`).
-2. **Relation Algebra** — Deterministic relation edges for dependency, derivation, contradiction, and evidence support.
-3. **Bitemporal Revision** — Dual-time revision semantics with `ValidTime` (when fact was true) and `TransactionTime` (when recorded), deterministic supersession/rollback, and as-of query behavior.
-4. **Provenance & Uncertainty** — Deterministic confidence composition from evidence atoms, rule-based inference with cycle-safe fixpoint evaluation, and lineage explainability.
-5. **Distributed Merge** — Replica-stable merge semantics with conflict classification (competing revisions, ID collisions, epoch quarantine, orphan relations) and deterministic resolution precedence.
-6. **Interval Surgery** — Deterministic overlap resolution for partial valid-time conflicts with rollback-safe projection semantics.
-7. **Cross-Epoch Migration** — Deterministic migration transactions converting quarantined foreign-epoch operations into admitted canonical state.
-8. **Witness Independence** — Witness-basis qualifiers for same-rule inference, reducing conservative undercount while preserving anti-inflation guarantees.
-9. **Multi-Hop Migration** — Path composition, cutover precedence, and non-destructive compaction for multi-epoch migration chains.
-10. **Surgery Strategy Governance** — Policy sequencing and admissibility constraints for interval-surgery strategy selection.
-
-> **Note:** The autonomous Continuum loop continued through iteration 58, adding governance layers (retention, caching, tiering, attestation, federation, etc.) that were never implemented. These were removed during cleanup.
+> **Note:** The autonomous Continuum loop (iterations 11-58) added speculative governance layers (interval surgery, epoch migration, witness independence, retention GC, federation, attestation) that were never implemented. These were removed during cleanup.
 
 ## Core Entities (V1)
 
-### 1. EntityNode
-- `entity_id`: stable ID from entity canonicalization layer.
-- `aliases`: lexical forms that may map to the same `entity_id`.
+### 1. ClaimCore
+- Semantic identity of a proposition.
+- `core_id = SHA-256(canonical(claim_type + sorted(slots)))`.
+- Fields: `claim_type: str`, `slots: dict[str, str]`.
 
-### 2. ClaimType
-- `claim_type_id`: ontology predicate ID with version (e.g., `org.ceo_of@v3`).
-- `roles`: ordered role schema with type constraints (e.g., `subject:Person`, `object:Organization`).
+### 2. ClaimRevision
+- Immutable assertion payload bound to one `core_id` and one `ValidTime` interval.
+- `revision_id = SHA-256(core_id + valid_time + assertion + confidence_bp + provenance + tx)`.
+- Fields: `core_id`, `assertion`, `confidence_bp`, `provenance`, `valid_time`, `transaction_time`, `metadata`.
 
-### 3. ClaimCore
-- Semantic identity of a proposition independent of provenance and revision events.
-- `core_id = H(ns, claim_type_id, role_fingerprint, polarity, quantifier, modality)`.
-- `role_fingerprint`: lexicographically sorted `role=value_token` pairs.
+### 3. RelationEdge
+- Deterministic typed edge between two revisions.
+- `relation_id = SHA-256(relation_type + sorted(from, to) + tx)`.
+- Fields: `relation_type`, `from_revision_id`, `to_revision_id`, `tx_id`, `recorded_at`.
 
-### 4. ClaimRevision
-- Immutable assertion payload bound to one `core_id` and one normalized valid-time interval.
-- `revision_id = H(ns_rev, core_id, valid_interval_fingerprint, assertion_kind, payload_fingerprint)`.
-- `assertion_kind`: `observed` | `inferred`.
+### 4. ValidTime
+- Half-open interval `[start, end)` representing when a fact was true in the real world.
+- Fields: `start: datetime`, `end: datetime | None`.
 
-### 5. RevisionStatusEvent
-- Append-only lifecycle event for one `revision_id`.
-- `status_event_id = H(ns_rev_evt, revision_id, event_type, cause_fingerprint, tx_id)`.
-- `event_type`: `asserted` | `superseded` | `retracted` | `auto_retracted`.
+### 5. TransactionTime
+- When an operation was recorded in the store.
+- Fields: `tx_id: int`, `recorded_at: datetime`.
 
-### 6. EvidenceAtom
-- `evidence_id`: stable ID for an atomic evidence payload.
-- Deterministic quality fields: `source_reliability_bp`, `extraction_quality_bp`, `independence_key` (all `0..10000` basis points).
+### 6. Provenance
+- Source attribution for a revision.
+- Fields: `source: str`, `evidence_ref: str | None`.
 
-### 7. RelationRecord
-- Canonical, hash-addressed relation instance.
-- `relation_id = H(ns_rel, relation_type_id, endpoint_fingerprint, qualifier_fingerprint)`.
+### 7. ConflictCode (Enum)
+- Classification of merge conflicts: `COMPETING_REVISION`, `ID_COLLISION`, `ORPHAN_RELATION`.
 
-### 8. RuleRecord
-- `rule_id`: stable identifier of deterministic inference rule implementation + version.
-- `rule_reliability_bp`: calibrated reliability prior in basis points.
+### 8. MergeConflict
+- Record of a single merge conflict with `conflict_code`, `description`, and `details`.
 
-### 9. TransactionRecord
-- `tx_id`: globally comparable tuple `(hlc_ms, replica_id, replica_seq)`.
-- `status`: `committed` | `voided`.
+### 9. MergeResult
+- Outcome of `store.merge()`: a merged `KnowledgeStore` plus a list of `MergeConflict` entries.
 
-### 10. SchemaEpoch
-- `schema_epoch_id`: immutable ID for the full canonicalization + invariant bundle.
-- Any change to normalization/invariant policy requires a new epoch ID.
-
-### 11. OperationEnvelope
-- Replication unit for append-only sync.
-- `op_id = H(ns_op, schema_epoch_id, tx_id, op_kind, subject_id, payload_hash)`.
-- Core V1 `op_kind` values: `upsert_core`, `assert_revision`, `append_status_event`, `assert_relation`, `upsert_evidence`, `upsert_rule`, `void_tx`, `apply_interval_surgery`, `apply_epoch_migration`, `apply_migration_compaction`.
-
-### 12. ConflictRecord
-- Deterministic record for merge/admission conflicts.
-- `conflict_id = H(ns_conflict, conflict_class, subject_fingerprint, first_seen_tx_id)`.
-- `conflict_class` includes: `CF-01` (competing revisions), `CF-02` (epoch quarantine), `CF-03` (ID collision/poison), `CF-04` (orphan relation), and others.
-- Resolution state: `open` | `resolved`, with optional chosen winner.
+### 10. KnowledgeStore
+- The core bitemporal store. Holds all claims, revisions, relations, and merge history.
+- Key operations: `assert_revision()`, `attach_relation()`, `query_as_of()`, `merge()`, `checkpoint()`.
+- Projection surfaces: revision lifecycle, relation lifecycle, relation resolution, merge conflict, state fingerprint — all with as-of, tx-window, and transition variants.
 
 ---
 
@@ -93,6 +77,10 @@ Protocol-based claim extraction with swappable backends:
 - `Extractor` Protocol: `.extract(text, claim_types) -> ExtractionResult`
 - `RegexExtractor`: Zero-dependency default for structured patterns
 - `LLMExtractor`: LLM-backed extraction for open-domain text
+- `PDFExtractor`: PyMuPDF text extraction + chunking
+- `DocxExtractor`: python-docx paragraphs + tables + metadata
+- `PptxExtractor`: python-pptx slides + shapes + tables + notes
+- `TextChunker`: Smart splitting with overlap
 
 Key design: ExtractionResult is non-deterministic output. Only `store.assert_revision()` crosses the commitment boundary.
 
@@ -105,37 +93,38 @@ Entity resolution decisions are stored AS CLAIMS in the KnowledgeStore:
 - Resolution decisions are auditable, retractable, and temporally queryable
 - `CascadingResolver`: exact → normalized → embedding → LLM (tried in order)
 
-This makes entity resolution a first-class operation in the knowledge graph, not a black box preprocessing step.
-
 ### DT-13: Temporal-Aware Search
 
 **Module:** `dks.index`
 
-Embedding-based semantic search filtered through `query_as_of()`:
-- `EmbeddingBackend` Protocol: `.embed(texts) -> vectors`
-- `SearchIndex`: Combines similarity with bitemporal visibility
-- Results honor the same temporal guarantees as direct queries
+Search index implementations filtered through `query_as_of()`:
+- `TemporalSearchIndex` Protocol with 4 conforming implementations
+- `TfidfSearchIndex`: TF-IDF with temporal filtering
+- `DenseSearchIndex`: Sentence-transformer embeddings
+- `HybridSearchIndex`: Reciprocal rank fusion (RRF)
+- `KnowledgeGraph`: Entity co-occurrence graph with traversal
 
 ### DT-14: Pipeline Orchestration
 
 **Module:** `dks.pipeline`
 
-Single canonical execution path: `Pipeline`
-- `ingest()`: extract → resolve → commit → index
-- `query()`: embed → search → temporal filter
-- `merge()`: deterministic store merge
-- `rebuild_index()`: reconstruct search index from store
+Single canonical execution path: `Pipeline` (50+ public methods)
+- `ingest_text()`, `ingest_pdf()`, `ingest_docx()`, `ingest_pptx()`, `ingest_directory()`
+- `query()`, `reason()`, `query_deep()`, `synthesize()`
+- `merge()`, `rebuild_index()`, `build_graph()`
+- `save()` / `load()`: Full state persistence (store + index + graph)
 
 ### DT-15: MCP Integration
 
 **Module:** `dks.mcp`
 
-Model Context Protocol server exposing Pipeline as tools:
-- `dks_ingest`: Ingest text into the store
-- `dks_query`: Semantic search with temporal filtering
-- `dks_query_exact`: Direct core_id lookup with bitemporal coordinates
-- `dks_snapshot`: Export canonical JSON
-- `dks_stats`: Store statistics
+Model Context Protocol server exposing Pipeline as 25 tools for AI agent integration.
+
+### DT-16: CLI
+
+**Module:** `dks.cli`
+
+Click-based CLI: `ingest`, `query`, `stats`, `sources`, `repl`, `demo`, `serve`.
 
 ## V2 Bug Fixes Applied to V1 Core
 

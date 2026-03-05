@@ -22,7 +22,7 @@
 
 ## Tests
 
-115 test files, 1,183 tests. Naming convention: `test_v{N}_{feature}.py`.
+115 test files, 1,183 tests. Primary naming convention: `test_v{N}_{feature}.py` (plus `test_acceptance_gate.py`).
 
 | Pattern | Description |
 |---------|-------------|
