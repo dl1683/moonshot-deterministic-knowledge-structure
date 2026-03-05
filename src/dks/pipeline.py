@@ -188,12 +188,6 @@ class Pipeline:
         """Return the audit trace from the last audited operation."""
         return self._audit.last_trace
 
-    def _begin_audit(self, operation: str, question: str) -> AuditTrace | None:
-        return self._audit.begin(operation, question)
-
-    def _finish_audit(self, trace: AuditTrace | None, t0: float) -> None:
-        self._audit.finish(trace, t0)
-
     def render_audit(self, trace: AuditTrace | None = None) -> str:
         """Render an audit trace as a human-readable markdown report."""
         if trace is None:
