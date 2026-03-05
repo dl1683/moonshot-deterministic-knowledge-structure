@@ -624,7 +624,7 @@ class SearchEngine:
         # Boilerplate entities ("chocolate milk") appear in many chunks but
         # always alongside the same newsletter content = same cluster.
         # Real technical entities ("neural networks") span diverse topics.
-        rev_to_cluster = getattr(graph, '_revision_cluster', None)
+        rev_to_cluster = graph.revision_cluster if graph is not None else None
         if rev_to_cluster and len(rev_to_cluster) > 0 and n_chunks > 50:
             # Only apply cluster filter on large enough corpora where
             # clustering is meaningful. For small corpora (<50 chunks),
