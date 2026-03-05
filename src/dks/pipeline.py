@@ -494,12 +494,10 @@ class Pipeline:
         # Clear existing index data before rebuilding to prevent duplicates
         tfidf = getattr(self._index, 'tfidf', None)
         if tfidf is not None:
-            tfidf._texts.clear()
-            tfidf._revision_ids.clear()
+            tfidf.clear()
         dense = getattr(self._index, 'dense', None)
         if dense is not None:
-            dense._texts.clear()
-            dense._revision_ids.clear()
+            dense.clear()
         self._index.add_batch(items)
 
         # Rebuild index matrix

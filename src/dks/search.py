@@ -1997,11 +1997,11 @@ class SearchEngine:
 
         tfidf = None
         if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index._tfidf
+            tfidf = self._index.tfidf
         elif isinstance(self._index, HybridSearchIndex):
-            tfidf = self._index._tfidf
+            tfidf = self._index.tfidf
 
-        if tfidf is None or not tfidf._fitted:
+        if tfidf is None or not tfidf.fitted:
             return []
 
         try:
@@ -2010,11 +2010,11 @@ class SearchEngine:
             return []
 
         # Use the full TF-IDF matrix
-        n = min(len(tfidf._texts), k)
+        n = min(len(tfidf.texts), k)
         if n < 2:
             return []
 
-        sim_matrix = cosine_similarity(tfidf._matrix[:n])
+        sim_matrix = cosine_similarity(tfidf.matrix[:n])
 
         # Union-find for clustering
         parent: dict[int, int] = {i: i for i in range(n)}
@@ -2049,14 +2049,14 @@ class SearchEngine:
                 continue
             cluster_results = []
             for idx in members:
-                rid = tfidf._revision_ids[idx]
+                rid = tfidf.revision_ids[idx]
                 rev = self.store.revisions.get(rid)
                 if rev and rev.status == "asserted" and rev.core_id not in retracted:
                     cluster_results.append(SearchResult(
                         core_id=rev.core_id,
                         revision_id=rid,
                         score=1.0,
-                        text=tfidf._texts[idx],
+                        text=tfidf.texts[idx],
                     ))
             if len(cluster_results) >= 2:
                 result.append(cluster_results)
@@ -2432,17 +2432,17 @@ class SearchEngine:
         # Compute pairwise similarity using TF-IDF
         tfidf = None
         if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index._tfidf
+            tfidf = self._index.tfidf
         elif isinstance(self._index, HybridSearchIndex):
-            tfidf = self._index._tfidf
+            tfidf = self._index.tfidf
 
         pairs_with_similarity: list[tuple[int, int, float]] = []
 
-        if tfidf is not None and tfidf._fitted:
+        if tfidf is not None and tfidf.fitted:
             try:
                 from sklearn.metrics.pairwise import cosine_similarity
                 texts = [r.text for r in results]
-                vecs = tfidf._vectorizer.transform(texts)
+                vecs = tfidf.vectorizer.transform(texts)
                 sim_matrix = cosine_similarity(vecs)
 
                 for i in range(len(results)):
@@ -2895,20 +2895,20 @@ class SearchEngine:
         # Get TF-IDF component for re-ranking
         tfidf = None
         if isinstance(self._index, TfidfSearchIndex):
-            tfidf = self._index._tfidf
+            tfidf = self._index.tfidf
         elif isinstance(self._index, HybridSearchIndex):
-            tfidf = self._index._tfidf
+            tfidf = self._index.tfidf
 
         if tfidf is None:
             return sorted(results, key=lambda r: -r.score)
 
         # Re-score against original question using TF-IDF
-        if not tfidf._fitted:
+        if not tfidf.fitted:
             tfidf.rebuild()
 
         try:
             from sklearn.metrics.pairwise import cosine_similarity
-            vectorizer = tfidf._vectorizer
+            vectorizer = tfidf.vectorizer
             q_vec = vectorizer.transform([question])
             text_vecs = vectorizer.transform([r.text for r in results])
             scores = cosine_similarity(q_vec, text_vecs)[0]

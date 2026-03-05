@@ -361,6 +361,38 @@ class TfidfIndex:
     def size(self) -> int:
         return len(self._texts)
 
+    @property
+    def fitted(self) -> bool:
+        """Whether the TF-IDF matrix has been built."""
+        return self._fitted
+
+    @property
+    def texts(self) -> list[str]:
+        """Indexed document texts."""
+        return self._texts
+
+    @property
+    def revision_ids(self) -> list[str]:
+        """Indexed revision IDs (parallel to texts)."""
+        return self._revision_ids
+
+    @property
+    def matrix(self) -> Any:
+        """The fitted TF-IDF sparse matrix (None if not fitted)."""
+        return self._matrix
+
+    @property
+    def vectorizer(self) -> Any:
+        """The sklearn TfidfVectorizer instance."""
+        return self._vectorizer
+
+    def clear(self) -> None:
+        """Clear all indexed data for rebuild."""
+        self._texts.clear()
+        self._revision_ids.clear()
+        self._matrix = None
+        self._fitted = False
+
     def get_state(self) -> dict:
         """Return serializable state for persistence."""
         return {
@@ -428,7 +460,7 @@ class TfidfSearchIndex:
         tx_id: Optional[int] = None,
     ) -> list[SearchResult]:
         """Search with temporal filtering."""
-        if not self._tfidf._fitted:
+        if not self._tfidf.fitted:
             self._tfidf.rebuild()
 
         # Get more candidates than needed to account for temporal filtering
@@ -491,9 +523,9 @@ class KnowledgeGraph:
             max_neighbors: Maximum neighbors per node.
             n_clusters: Number of topic clusters.
         """
-        if not tfidf_index._fitted:
+        if not tfidf_index.fitted:
             tfidf_index.rebuild()
-        if tfidf_index._matrix is None:
+        if tfidf_index.matrix is None:
             return
 
         try:
@@ -503,8 +535,8 @@ class KnowledgeGraph:
         except ImportError:
             raise ImportError("scikit-learn + numpy required for graph building")
 
-        matrix = tfidf_index._matrix
-        revision_ids = tfidf_index._revision_ids
+        matrix = tfidf_index.matrix
+        revision_ids = tfidf_index.revision_ids
         n_docs = len(revision_ids)
 
         if n_docs == 0:
@@ -534,8 +566,8 @@ class KnowledgeGraph:
             self._revision_cluster[revision_ids[idx]] = cluster_id
 
         # Extract cluster labels (top terms per cluster)
-        if hasattr(tfidf_index._vectorizer, 'get_feature_names_out'):
-            feature_names = tfidf_index._vectorizer.get_feature_names_out()
+        if hasattr(tfidf_index.vectorizer, 'get_feature_names_out'):
+            feature_names = tfidf_index.vectorizer.get_feature_names_out()
             if actual_clusters > 1:
                 for cluster_id in range(actual_clusters):
                     cluster_mask = labels == cluster_id
@@ -899,6 +931,23 @@ class SentenceTransformerIndex:
         """Name of the sentence-transformer model."""
         return self._model_name
 
+    @property
+    def dirty(self) -> bool:
+        """Whether the embeddings need to be rebuilt."""
+        return self._dirty
+
+    @property
+    def embeddings(self) -> Any:
+        """The numpy embedding matrix (None if not built)."""
+        return self._embeddings
+
+    def clear(self) -> None:
+        """Clear all indexed data for rebuild."""
+        self._texts.clear()
+        self._revision_ids.clear()
+        self._embeddings = None
+        self._dirty = False
+
     def get_state(self) -> dict:
         """Return serializable state for persistence."""
         if self._dirty or self._embeddings is None:
@@ -975,7 +1024,7 @@ class DenseSearchIndex:
         tx_id: Optional[int] = None,
     ) -> list[SearchResult]:
         """Search with temporal filtering."""
-        if self._dense._dirty or self._dense._embeddings is None:
+        if self._dense.dirty or self._dense.embeddings is None:
             self._dense.rebuild()
 
         raw_results = self._dense.search(query, k=k * 3)
