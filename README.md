@@ -151,7 +151,7 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-1174 tests covering:
+1179 tests covering:
 - Identity determinism and Unicode convergence
 - Bitemporal queries and retraction semantics
 - Merge CRDT properties (commutativity, associativity, idempotency) via Hypothesis
