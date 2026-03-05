@@ -303,7 +303,7 @@ dks repl
   dks> suggest
 ```
 
-20+ commands: `query`, `reason`, `profile`, `quality`, `timeline`, `sources`, `browse`, `chunk`, `evolve`, `compare`, `contradictions`, `staleness`, `entities`, `insights`, `suggest`, `annotate`, `annotations`, `summary`, `stats`, `save`.
+20+ commands: `query`, `reason`, `profile`, `quality`, `timeline`, `sources`, `source`, `browse`, `chunk`, `evolve`, `compare`, `contradictions`, `staleness`, `entities`, `insights`, `suggest`, `annotate`, `annotations`, `summary`, `stats`, `save`, `help`.
 
 ## Architecture
 
