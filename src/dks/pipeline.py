@@ -456,7 +456,7 @@ class Pipeline:
         # Merge chunk siblings from other pipeline
         for source, rids in other._chunk_siblings.items():
             if source not in self._chunk_siblings:
-                self._chunk_siblings[source] = rids
+                self._chunk_siblings[source] = list(rids)
             else:
                 # Merge revision lists, avoiding duplicates
                 existing = set(self._chunk_siblings[source])
@@ -499,11 +499,12 @@ class Pipeline:
             self._index.tfidf.clear()
         elif isinstance(self._index, DenseSearchIndex):
             self._index.dense.clear()
+        elif isinstance(self._index, SearchIndex):
+            self._index.clear()
         self._index.add_batch(items)
 
-        # Rebuild index matrix (all concrete types except SearchIndex)
-        if isinstance(self._index, (TfidfSearchIndex, DenseSearchIndex, HybridSearchIndex)):
-            self._index.rebuild()
+        # Rebuild index (all types)
+        self._index.rebuild()
 
         self._index_dirty = False
         return len(items)

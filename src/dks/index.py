@@ -200,6 +200,25 @@ class SearchIndex:
         ]
         return _apply_temporal_filter(self._store, candidates, k, valid_at, tx_id)
 
+    def clear(self) -> None:
+        """Clear all indexed data for rebuild."""
+        self._vectors.clear()
+        self._texts.clear()
+
+    def rebuild(self) -> None:
+        """Rebuild embeddings from stored texts.
+
+        Re-embeds all stored texts. Useful after load/merge when
+        the embedding state may be stale.
+        """
+        if not self._texts:
+            self._vectors.clear()
+            return
+        items = list(self._texts.items())
+        revision_ids, texts = zip(*items)
+        vectors = self._backend.embed(list(texts))
+        self._vectors = dict(zip(revision_ids, vectors))
+
     @property
     def size(self) -> int:
         """Number of indexed vectors."""

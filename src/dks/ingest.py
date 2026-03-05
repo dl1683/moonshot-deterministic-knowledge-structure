@@ -114,11 +114,9 @@ class Ingester:
         for i, claim in enumerate(resolved_claims):
             extraction_prov = extraction.provenance[i] if i < len(extraction.provenance) else prov
 
-            # For document chunks, use full chunk text as assertion (from evidence_ref)
-            if extraction_prov.evidence_ref and len(extraction_prov.evidence_ref) > 500:
-                assertion = extraction_prov.evidence_ref
-            else:
-                assertion = text[:500]
+            # For document chunks, use evidence_ref (the original chunk text)
+            # as both the assertion and the indexed text to keep them consistent.
+            assertion = extraction_prov.evidence_ref or text[:500]
 
             revision = self.store.assert_revision(
                 core=claim,
@@ -131,10 +129,9 @@ class Ingester:
             )
             revision_ids.append(revision.revision_id)
 
-            # Phase 4: Index for search (use full chunk text for better search)
+            # Phase 4: Index for search (same text as assertion)
             if self._index is not None:
-                index_text = extraction_prov.evidence_ref or text[:500]
-                self._index.add(revision.revision_id, index_text)
+                self._index.add(revision.revision_id, assertion)
 
         return revision_ids
 
@@ -320,7 +317,7 @@ class Ingester:
                     chunker=chunker,
                 )
                 results[pdf_path.name] = revision_ids
-            except Exception as e:
+            except (ValueError, OSError, RuntimeError) as e:
                 errors[pdf_path.name] = str(e)
                 if progress:
                     print(

@@ -349,7 +349,7 @@ class MCPToolHandler:
             return {"error": f"Unknown tool: {name}"}
         try:
             return handler(arguments)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, OSError) as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
     def _handle_ingest(self, args: dict[str, Any]) -> dict[str, Any]:
