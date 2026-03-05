@@ -57,6 +57,7 @@ from .index import (
     SearchIndex,
     SearchResult,
     SentenceTransformerIndex,
+    TemporalSearchIndex,
     TfidfIndex,
     TfidfSearchIndex,
 )
@@ -130,6 +131,7 @@ __all__ = [
     "SearchIndex",
     "SearchResult",
     "SentenceTransformerIndex",
+    "TemporalSearchIndex",
     "TfidfIndex",
     "TfidfSearchIndex",
     # V2 audit

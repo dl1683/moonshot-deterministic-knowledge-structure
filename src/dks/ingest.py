@@ -332,7 +332,8 @@ class Ingester:
                 file=sys.stderr,
             )
 
-        # Rebuild search index after batch ingestion
+        # Rebuild search index after batch ingestion.
+        # SearchIndex embeds on add(), so rebuild is only needed for deferred-build types.
         if isinstance(self._index, (TfidfSearchIndex, DenseSearchIndex, HybridSearchIndex)):
             self._index.rebuild()
 

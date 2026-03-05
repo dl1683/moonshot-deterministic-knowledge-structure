@@ -30,6 +30,35 @@ class SearchResult:
     text: str
 
 
+@runtime_checkable
+class TemporalSearchIndex(Protocol):
+    """Protocol defining the contract for all DKS search index types.
+
+    All search indexes (SearchIndex, TfidfSearchIndex, DenseSearchIndex,
+    HybridSearchIndex) implement this interface. Use this for type hints
+    when any search index type is acceptable.
+
+    Methods:
+        add: Index a single revision.
+        add_batch: Index multiple revisions at once.
+        search: Search with optional temporal filtering.
+        clear: Clear all indexed data for rebuild.
+        rebuild: Rebuild internal state after batch operations.
+        size: Number of indexed items.
+    """
+
+    def add(self, revision_id: str, text: str) -> None: ...
+    def add_batch(self, items: list[tuple[str, str]]) -> None: ...
+    def search(self, query: str, *, k: int = 5,
+               valid_at: datetime | None = None,
+               tx_id: int | None = None) -> list[SearchResult]: ...
+    def clear(self) -> None: ...
+    def rebuild(self) -> None: ...
+
+    @property
+    def size(self) -> int: ...
+
+
 def _apply_temporal_filter(
     store: KnowledgeStore,
     candidates: list[tuple[str, float, str]],
@@ -466,6 +495,9 @@ class TfidfSearchIndex:
 
     def add_batch(self, items: list[tuple[str, str]]) -> None:
         self._tfidf.add_batch(items)
+
+    def clear(self) -> None:
+        self._tfidf.clear()
 
     def rebuild(self) -> None:
         self._tfidf.rebuild()
@@ -1034,6 +1066,10 @@ class DenseSearchIndex:
     def rebuild(self) -> None:
         self._dense.rebuild()
 
+    def clear(self) -> None:
+        """Remove all entries from the dense index."""
+        self._dense.clear()
+
     def search(
         self,
         query: str,
@@ -1118,6 +1154,11 @@ class HybridSearchIndex:
     def rebuild(self) -> None:
         self._tfidf.rebuild()
         self._dense.rebuild()
+
+    def clear(self) -> None:
+        """Remove all entries from both TF-IDF and dense indexes."""
+        self._tfidf.clear()
+        self._dense.clear()
 
     def search(
         self,
