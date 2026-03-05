@@ -3,6 +3,8 @@
 Track failure classes and mitigations for the data structure design.
 
 > **Note:** The original catalog contained 276 entries (FM-001 through FM-276). Entries FM-021 through FM-276 covered governance-layer extensions (retention, caching, tiering, attestation, federation, etc.) that were never implemented in V1. Only the 20 core failure modes are retained below.
+>
+> **Scope:** FM-001 through FM-009 are directly mitigated in the current implementation. FM-010 through FM-020 describe risks from the original design spec whose mitigations (independence-key grouping, witness-basis qualifiers, interval surgery, schema epochs, migration) are *design intent* not yet implemented in V1.
 
 ## FM-001: Semantic Collision
 

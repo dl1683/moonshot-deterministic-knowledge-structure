@@ -18,12 +18,12 @@ The core architectural decisions are embedded in the V1 design itself:
 
 5. **Sorted-key reducer ordering** — Merge applies operations in deterministic `op_id` order regardless of arrival order. Chosen over arrival-order processing for convergence.
 
-6. **Independence-key evidence grouping** — Confidence aggregation groups evidence by `independence_key` and takes max per group. Chosen over naive sum/noisy-or for anti-inflation.
+6. **Independence-key evidence grouping** *(design intent, not yet implemented)* — Confidence aggregation groups evidence by `independence_key` and takes max per group. Chosen over naive sum/noisy-or for anti-inflation.
 
-7. **Immutable witness-basis qualifiers** — Inference witnesses store assertion-time basis snapshots. Chosen over dynamic recomputation for rollback stability.
+7. **Immutable witness-basis qualifiers** *(design intent, not yet implemented)* — Inference witnesses store assertion-time basis snapshots. Chosen over dynamic recomputation for rollback stability.
 
-8. **Compare-and-swap admission** — Surgery and migration operations use basis-hash CAS. Chosen over unconditional apply for stale-plan rejection.
+8. **Compare-and-swap admission** *(design intent, not yet implemented)* — Surgery and migration operations use basis-hash CAS. Chosen over unconditional apply for stale-plan rejection.
 
 9. **Snapshot persistence** — Full store state serializable to canonical JSON/binary payload with round-trip validation. Chosen for checkpoint/restart determinism.
 
-10. **Schema epoch gating** — Operations bound to `schema_epoch_id`; mismatched epochs quarantined. Chosen over implicit compatibility for cross-version safety.
+10. **Schema epoch gating** *(design intent, not yet implemented)* — Operations bound to `schema_epoch_id`; mismatched epochs quarantined. Chosen over implicit compatibility for cross-version safety.

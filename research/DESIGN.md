@@ -29,13 +29,13 @@ Working name: Deterministic Knowledge Structure (`DKS`).
 
 ### 2. ClaimRevision
 - Immutable assertion payload bound to one `core_id` and one `ValidTime` interval.
-- `revision_id = SHA-256(core_id + valid_time + assertion + confidence_bp + provenance + tx)`.
-- Fields: `core_id`, `assertion`, `confidence_bp`, `provenance`, `valid_time`, `transaction_time`, `metadata`.
+- `revision_id = SHA-256(core_id + assertion + valid_time + transaction_time + provenance + confidence_bp + status)`.
+- Fields: `core_id: str`, `assertion: str`, `valid_time: ValidTime`, `transaction_time: TransactionTime`, `provenance: Provenance`, `confidence_bp: int`, `status: "asserted" | "retracted"`.
 
 ### 3. RelationEdge
 - Deterministic typed edge between two revisions.
-- `relation_id = SHA-256(relation_type + sorted(from, to) + tx)`.
-- Fields: `relation_type`, `from_revision_id`, `to_revision_id`, `tx_id`, `recorded_at`.
+- `relation_id = SHA-256(relation_type + from_revision_id + to_revision_id + transaction_time)`. Endpoints are lexicographically sorted for symmetric types (`contradicts`); ordered for directional types (`supports`, `depends_on`, `derived_from`).
+- Fields: `relation_type: str`, `from_revision_id: str`, `to_revision_id: str`, `transaction_time: TransactionTime`.
 
 ### 4. ValidTime
 - Half-open interval `[start, end)` representing when a fact was true in the real world.
@@ -50,10 +50,10 @@ Working name: Deterministic Knowledge Structure (`DKS`).
 - Fields: `source: str`, `evidence_ref: str | None`.
 
 ### 7. ConflictCode (Enum)
-- Classification of merge conflicts: `COMPETING_REVISION`, `ID_COLLISION`, `ORPHAN_RELATION`.
+- Classification of merge conflicts: `CORE_ID_COLLISION`, `REVISION_ID_COLLISION`, `RELATION_ID_COLLISION`, `COMPETING_REVISION_SAME_SLOT`, `COMPETING_LIFECYCLE_SAME_SLOT`, `ORPHAN_RELATION_ENDPOINT`.
 
 ### 8. MergeConflict
-- Record of a single merge conflict with `conflict_code`, `description`, and `details`.
+- Record of a single merge conflict with `code: ConflictCode`, `entity_id: str`, and `details: str`.
 
 ### 9. MergeResult
 - Outcome of `store.merge()`: a merged `KnowledgeStore` plus a list of `MergeConflict` entries.
@@ -91,7 +91,7 @@ Key design: ExtractionResult is non-deterministic output. Only `store.assert_rev
 Entity resolution decisions are stored AS CLAIMS in the KnowledgeStore:
 - `ClaimCore(claim_type="dks.entity_alias@v1", slots={"surface": mention, "entity": entity_id, "method": method})`
 - Resolution decisions are auditable, retractable, and temporally queryable
-- `CascadingResolver`: exact → normalized → embedding → LLM (tried in order)
+- `CascadingResolver`: chains user-provided resolvers (built-in: exact → normalized; embedding/LLM are extension points)
 
 ### DT-13: Temporal-Aware Search
 

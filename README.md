@@ -52,7 +52,7 @@ dks query "system architecture" --reason    # multi-hop reasoning
 # Explore
 dks stats                    # cores, revisions, indexed count
 dks sources                  # list all documents
-dks repl                     # interactive explorer (25+ commands)
+dks repl                     # interactive explorer (20+ commands)
 dks demo ./papers/           # automated capability demo
 
 # AI agent integration
@@ -303,7 +303,7 @@ dks repl
   dks> suggest
 ```
 
-25+ commands: `query`, `reason`, `profile`, `quality`, `timeline`, `sources`, `browse`, `chunk`, `evolve`, `compare`, `contradictions`, `staleness`, `entities`, `insights`, `suggest`, `annotate`, `annotations`, `summary`, `stats`, `save`.
+20+ commands: `query`, `reason`, `profile`, `quality`, `timeline`, `sources`, `browse`, `chunk`, `evolve`, `compare`, `contradictions`, `staleness`, `entities`, `insights`, `suggest`, `annotate`, `annotations`, `summary`, `stats`, `save`.
 
 ## Architecture
 
@@ -319,7 +319,7 @@ dks/
   mcp.py       MCPToolHandler — 25 tools for AI agent integration (~615 lines)
   cli.py       Click-based CLI — ingest, query, explore, serve (~575 lines)
   extract.py   Extractor Protocol + Regex + LLM + PDF + DOCX + PPTX (~835 lines)
-  ingest.py    Ingester: extract → resolve → commit → index (~520 lines)
+  ingest.py    Ingester: extract → resolve → commit → index (~490 lines)
   results.py   Result dataclasses for structured output (~275 lines)
   audit.py     AuditEvent / AuditTrace / AuditManager (~175 lines)
   resolve.py   Resolver Protocol + cascading resolution (~165 lines)
